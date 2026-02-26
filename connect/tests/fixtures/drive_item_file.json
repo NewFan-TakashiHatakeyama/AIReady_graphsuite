@@ -1,0 +1,49 @@
+{
+  "id": "ITEM001_FILE",
+  "name": "test-report-2026.docx",
+  "description": "Monthly report",
+  "size": 15360,
+  "webUrl": "https://example.sharepoint.com/Shared%20Documents/test-report-2026.docx",
+  "webDavUrl": "https://example.sharepoint.com/Shared%20Documents/test-report-2026.docx",
+  "eTag": "\"{ITEM001_FILE},1\"",
+  "cTag": "\"c:{ITEM001_FILE},1\"",
+  "createdDateTime": "2026-01-15T10:00:00Z",
+  "lastModifiedDateTime": "2026-02-08T14:30:00Z",
+  "createdBy": {
+    "user": {
+      "id": "user-001",
+      "displayName": "Taro Yamada",
+      "email": "taro@example.com"
+    }
+  },
+  "lastModifiedBy": {
+    "user": {
+      "id": "user-002",
+      "displayName": "Hanako Suzuki",
+      "email": "hanako@example.com"
+    },
+    "application": {
+      "id": "app-001",
+      "displayName": "GraphSuite-FileSync"
+    }
+  },
+  "parentReference": {
+    "driveId": "b!test-drive-id-12345",
+    "driveType": "documentLibrary",
+    "id": "PARENT001",
+    "name": "Shared Documents",
+    "path": "/drives/b!test-drive-id-12345/root:",
+    "siteId": "site-001"
+  },
+  "file": {
+    "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "hashes": {
+      "sha256Hash": "abc123def456"
+    }
+  },
+  "sharepointIds": {
+    "listId": "list-001",
+    "listItemId": "item-001",
+    "siteId": "site-001"
+  }
+}

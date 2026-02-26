@@ -1,0 +1,11 @@
+{
+  "id": "ITEM002_DELETED",
+  "name": "old-document.pdf",
+  "deleted": {
+    "state": "deleted"
+  },
+  "lastModifiedDateTime": "2026-02-08T15:00:00Z",
+  "parentReference": {
+    "driveId": "b!test-drive-id-12345"
+  }
+}

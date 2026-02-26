@@ -1,0 +1,17 @@
+FROM public.ecr.aws/lambda/python:3.12
+
+# OS 依存パッケージ（PDF テキスト抽出用）
+RUN dnf install -y poppler-utils libxml2 libxslt && dnf clean all
+
+# Python パッケージ
+COPY docker/requirements.sensitivity.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# spaCy 英語 Transformer モデル
+RUN python -m spacy download en_core_web_trf
+
+# アプリケーションコード
+# ja-ginza モデルは pip install ja-ginza で自動インストール済み
+COPY src/ ${LAMBDA_TASK_ROOT}/
+
+CMD ["handlers.detect_sensitivity.handler"]

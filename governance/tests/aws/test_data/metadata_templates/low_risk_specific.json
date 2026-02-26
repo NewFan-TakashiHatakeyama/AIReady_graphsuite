@@ -1,0 +1,17 @@
+{
+    "tenant_id": "test-tenant-dvt-001",
+    "item_id": "PLACEHOLDER",
+    "source": "m365",
+    "container_id": "site-general-001",
+    "container_name": "一般文書サイト",
+    "container_type": "site",
+    "item_name": "社内報_2026.pdf",
+    "web_url": "https://contoso.sharepoint.com/sites/general/documents/newsletter.pdf",
+    "sharing_scope": "specific",
+    "permissions": "{\"entries\": [{\"identity\": {\"displayName\": \"General Users\"}}]}",
+    "permissions_count": 5,
+    "mime_type": "application/pdf",
+    "size": 1024000,
+    "is_deleted": false,
+    "raw_s3_key": "raw/test-tenant-dvt-001/PLACEHOLDER/2026-02-23.json"
+}

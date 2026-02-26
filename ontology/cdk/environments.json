@@ -1,0 +1,38 @@
+{
+  "dev": {
+    "account": "565699611973",
+    "region": "ap-northeast-1",
+    "tenantId": "tenant-alpha",
+    "stackPrefix": "AIReadyOntology",
+    "sharedVpcId": null,
+    "alertEmail": "ops@example.com",
+    "connectFileMetadataTableName": "AIReadyConnect-FileMetadata",
+    "connectFileMetadataStreamArn": "arn:aws:dynamodb:ap-northeast-1:565699611973:table/AIReadyConnect-FileMetadata/stream/2026-02-23T12:21:33.842",
+    "governanceFindingTableName": "AIReadyGov-ExposureFinding",
+    "documentAnalysisTableName": "AIReadyGov-DocumentAnalysis"
+  },
+  "stg": {
+    "account": "222222222222",
+    "region": "ap-northeast-1",
+    "tenantId": "tenant-beta",
+    "stackPrefix": "AIReadyOntology",
+    "sharedVpcId": "vpc-REPLACE-STG",
+    "alertEmail": "ops@example.com",
+    "connectFileMetadataTableName": "FileMetadata-tenant-beta",
+    "connectFileMetadataStreamArn": "arn:aws:dynamodb:ap-northeast-1:222222222222:table/FileMetadata-tenant-beta/stream/REPLACE_WITH_STREAM_LABEL",
+    "governanceFindingTableName": "AIReadyGov-ExposureFinding",
+    "documentAnalysisTableName": "AIReadyGov-DocumentAnalysis"
+  },
+  "prod": {
+    "account": "333333333333",
+    "region": "ap-northeast-1",
+    "tenantId": "tenant-main",
+    "stackPrefix": "AIReadyOntology",
+    "sharedVpcId": "vpc-REPLACE-PROD",
+    "alertEmail": "ops@example.com",
+    "connectFileMetadataTableName": "FileMetadata-tenant-main",
+    "connectFileMetadataStreamArn": "arn:aws:dynamodb:ap-northeast-1:333333333333:table/FileMetadata-tenant-main/stream/REPLACE_WITH_STREAM_LABEL",
+    "governanceFindingTableName": "AIReadyGov-ExposureFinding",
+    "documentAnalysisTableName": "AIReadyGov-DocumentAnalysis"
+  }
+}

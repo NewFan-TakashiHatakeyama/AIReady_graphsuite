@@ -1,0 +1,16 @@
+{
+  "value": [
+    {
+      "subscriptionId": "sub-001",
+      "changeType": "updated",
+      "resource": "drives/b!test-drive-id-12345/root",
+      "resourceData": {
+        "@odata.type": "#microsoft.graph.driveItem",
+        "@odata.id": "drives/b!test-drive-id-12345/root",
+        "id": "ITEM001_FILE"
+      },
+      "clientState": "test-client-state-secret",
+      "tenantId": "tenant-uuid-001"
+    }
+  ]
+}

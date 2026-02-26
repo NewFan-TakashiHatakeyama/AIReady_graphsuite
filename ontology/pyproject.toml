@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "ai-ready-ontology"
+version = "0.1.0"
+description = "Infrastructure and data model for AI Ready Ontology"
+authors = ["AI Ready Team"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+aws-cdk-lib = "^2.178.0"
+constructs = "^10.0.0"
+boto3 = "^1.40.34"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+black = "^24.10.0"
+flake8 = "^7.1.0"
+
+[tool.black]
+line-length = 88
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"

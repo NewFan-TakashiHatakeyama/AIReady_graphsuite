@@ -1,0 +1,18 @@
+{
+    "tenant_id": "test-tenant-dvt-001",
+    "item_id": "PLACEHOLDER",
+    "source": "m365",
+    "container_id": "site-hr-001",
+    "container_name": "人事部サイト",
+    "container_type": "site",
+    "item_name": "給与一覧_2026Q1.xlsx",
+    "web_url": "https://contoso.sharepoint.com/sites/hr/documents/salary.xlsx",
+    "sharing_scope": "organization",
+    "permissions": "{\"entries\": [{\"identity\": {\"displayName\": \"Everyone except external users\"}}]}",
+    "permissions_count": 200,
+    "sensitivity_label": "{\"id\": \"lbl-001\", \"name\": \"Highly Confidential\"}",
+    "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "size": 4096000,
+    "is_deleted": false,
+    "raw_s3_key": "raw/test-tenant-dvt-001/PLACEHOLDER/2026-02-23.json"
+}

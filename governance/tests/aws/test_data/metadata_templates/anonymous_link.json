@@ -1,0 +1,17 @@
+{
+    "tenant_id": "test-tenant-dvt-001",
+    "item_id": "PLACEHOLDER",
+    "source": "m365",
+    "container_id": "site-marketing-001",
+    "container_name": "マーケティング部サイト",
+    "container_type": "site",
+    "item_name": "プレゼン資料_外部向け.pptx",
+    "web_url": "https://contoso.sharepoint.com/sites/marketing/documents/presentation.pptx",
+    "sharing_scope": "anonymous",
+    "permissions": "{\"entries\": [{\"identity\": {\"displayName\": \"Anonymous User\"}}, {\"identity\": {\"userType\": \"guest\", \"email\": \"ext@partner.com\"}}]}",
+    "permissions_count": 300,
+    "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "size": 8192000,
+    "is_deleted": false,
+    "raw_s3_key": "raw/test-tenant-dvt-001/PLACEHOLDER/2026-02-23.json"
+}
