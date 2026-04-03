@@ -15,19 +15,36 @@ from src.connectors.m365.graph_client import GraphClient
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """EventBridge から呼び出されるトークン更新ハンドラー"""
+    """EventBridge から呼び出されるトークン更新ハンドラー。
+
+    tenant/connection スコープの認証情報を使って
+    アクセストークンを再発行し、SSM に保存する。
+
+    Args:
+        event: Lambda 実行イベント
+        context: Lambda コンテキスト
+
+    Returns:
+        更新結果を含むレスポンス辞書
+
+    Raises:
+        Exception: トークン更新または保存に失敗した場合
+    """
     cfg = get_config()
+    tenant_id = str(event.get("tenant_id") or cfg.tenant_id).strip() or cfg.tenant_id
+    connection_id = str(event.get("connection_id") or "").strip()
     request_id = getattr(context, "aws_request_id", "local")
-    logger = get_logger(__name__, tenant_id=cfg.tenant_id, request_id=request_id)
+    logger = get_logger(__name__, tenant_id=tenant_id, request_id=request_id)
 
     log_with_context(logger, logging.INFO, "Starting access token renewal")
 
     try:
-        # SSM から認証情報を読み込んで GraphClient を初期化
-        client = GraphClient.from_ssm()
+        # SSM から認証情報を読み込み GraphClient を初期化。
+        # この時点では既存 token の有効性は問わず、更新処理で上書きする。
+        client = GraphClient.from_ssm(tenant_id=tenant_id, connection_id=connection_id)
 
         # トークンを更新して SSM に保存
-        token = client.refresh_and_store_token()
+        token = client.refresh_and_store_token(tenant_id=tenant_id, connection_id=connection_id)
 
         log_with_context(
             logger, logging.INFO,

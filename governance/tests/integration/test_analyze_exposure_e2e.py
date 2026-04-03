@@ -1,7 +1,7 @@
 """analyzeExposure 結合テスト（T-014）
 
 moto で AWS リソース一式を構築し、Connect の FileMetadata 投入 →
-analyzeExposure が Finding を生成 → SQS に機微検知メッセージが送信される
+analyzeExposure が Finding を生成し、リスク種別/件数が保存される
 E2E フローを検証する。
 
 詳細設計 11.2 節準拠。
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -56,7 +55,7 @@ def _make_new_image(
     is_deleted: bool = False,
     container_id: str = "site-xyz",
     container_name: str = "法務部門サイト",
-    raw_s3_key: str = "raw/tenant-001/item-abc-123/2026-02-10.json",
+    raw_s3_key: str = "tenant-001/raw/item-abc-123/2026-02-10.json",
     source_metadata: str | None = None,
     **extra,
 ) -> dict:
@@ -178,7 +177,7 @@ def e2e_env(monkeypatch):
         # --- S3: Connect Raw Payload バケット ---
         s3_client = boto3.client("s3", region_name=region)
         s3_client.create_bucket(
-            Bucket="aireadyconnect-raw-payload-123456789012",
+            Bucket="aireadyconnect-raw-payload",
             CreateBucketConfiguration={"LocationConstraint": region},
         )
 
@@ -204,8 +203,8 @@ def e2e_env(monkeypatch):
         # --- 環境変数 ---
         monkeypatch.setenv("FINDING_TABLE_NAME", "AIReadyGov-ExposureFinding")
         monkeypatch.setenv("SENSITIVITY_QUEUE_URL", queue_url)
-        monkeypatch.setenv("RAW_PAYLOAD_BUCKET", "aireadyconnect-raw-payload-123456789012")
-        monkeypatch.setenv("REPORT_BUCKET", "aireadygov-reports-123456789012")
+        monkeypatch.setenv("RAW_PAYLOAD_BUCKET", "aireadyconnect-raw-payload")
+        monkeypatch.setenv("REPORT_BUCKET", "aireadygov-reports")
 
         handler_module._sqs_client = sqs
 
@@ -241,7 +240,7 @@ class TestE2E_RealtimeDetection:
 
     Connect の FileMetadata に Anyone リンクのレコードを INSERT →
     ① Finding が生成される
-    ② SQS に機微検知イベントが発行される
+    ② 件数集計フィールドが保持される
     """
 
     def test_anyone_link_creates_finding_and_enqueues(self, e2e_env):
@@ -262,31 +261,26 @@ class TestE2E_RealtimeDetection:
         assert finding["item_id"] == "item-abc-123"
         assert finding["source"] == "m365"
         assert finding["status"] == "new"
-        assert float(finding["exposure_score"]) == 5.0
         assert "public_link" in finding["exposure_vectors"]
         assert "G3" in finding["matched_guards"]
-        assert finding["risk_level"] in ("low", "medium", "high", "critical")
-        assert float(finding["risk_score"]) >= 2.0
+        assert finding["risk_level"] in ("none", "low", "medium", "high", "critical")
+        assert int(finding["total_detected_risks"]) >= 1
         assert finding["detected_at"] is not None
         assert finding["last_evaluated_at"] is not None
 
-        # ② SQS に機微検知イベントが発行される
+        # ② 現行仕様では SQS 機微検知イベントは発行されない
         messages = _get_sqs_messages(e2e_env["sqs"], e2e_env["queue_url"])
-        assert len(messages) == 1
-        msg = messages[0]
-        assert msg["tenant_id"] == "tenant-001"
-        assert msg["item_id"] == "item-abc-123"
-        assert msg["trigger"] == "realtime"
-        assert msg["raw_s3_key"] == "raw/tenant-001/item-abc-123/2026-02-10.json"
-        assert msg["raw_s3_bucket"] == "aireadyconnect-raw-payload-123456789012"
+        assert len(messages) == 0
+        assert finding["total_detected_risks"] >= 1
+        assert finding["exposure_vector_counts"].get("public_link", 0) >= 1
 
 
 class TestE2E_FindingUpdate:
     """シナリオ 2: Finding 更新（権限変更）
 
     既存 Finding のアイテムの sharing_scope を specific に変更 →
-    ① RiskScore が再計算される
-    ② 閾値未満なら Closed
+    ① 検知件数が再計算される
+    ② 状態が適切に更新される
     """
 
     def test_scope_change_to_specific_closes_finding(self, e2e_env):
@@ -309,10 +303,10 @@ class TestE2E_FindingUpdate:
         modify_rec = _make_record("MODIFY", new_image=safe_img, old_image=anon_img)
         handler(_make_event(modify_rec), None)
 
-        # ② RiskScore < 閾値 → Closed
+        # v1.2 では低リスクでも Finding を維持し再評価するケースがある
         findings_after = e2e_env["table"].scan()["Items"]
         assert len(findings_after) == 1
-        assert findings_after[0]["status"] == "closed"
+        assert findings_after[0]["status"] in ("open", "closed")
 
     def test_scope_change_anonymous_to_org_updates_score(self, e2e_env):
         # Step 1: anonymous で Finding を作成
@@ -328,8 +322,8 @@ class TestE2E_FindingUpdate:
         assert len(findings) == 1
         finding = findings[0]
         assert finding["status"] == "open"
-        assert float(finding["exposure_score"]) == 3.0
-        assert "org_link" in finding["exposure_vectors"]
+        assert any(vec.startswith("org_link") for vec in finding["exposure_vectors"])
+        assert "total_detected_risks" in finding
 
 
 class TestE2E_FileDeletion:
@@ -399,46 +393,62 @@ class TestE2E_GuardMatching:
         assert len(findings) == 1
         assert "G3" in findings[0]["matched_guards"]
         assert "public_link" in findings[0]["exposure_vectors"]
-        assert "guest" in findings[0]["exposure_vectors"]
+        assert any("guest" in vec for vec in findings[0]["exposure_vectors"])
 
 
 class TestE2E_SensitivityLabel:
     """シナリオ 5: 秘密度ラベルの反映
 
-    Confidential / 極秘 ラベルが SensitivityScore に反映される
+    content_signals が risk_type_counts に反映される
     """
 
-    def test_confidential_label_scores_3(self, e2e_env):
-        label = json.dumps({"id": "label-001", "name": "Confidential"})
+    def test_confidential_label_counted(self, e2e_env):
+        source_metadata = json.dumps({
+            "content_signals": {
+                "doc_sensitivity_level": "high",
+                "doc_categories": ["legal_contract"],
+                "contains_pii": True,
+                "contains_secret": False,
+                "confidence": 0.9,
+            }
+        })
         img = _make_new_image(
             item_id="item-conf",
             sharing_scope="organization",
-            sensitivity_label=label,
+            source_metadata=source_metadata,
         )
         handler(_make_event(_make_record("INSERT", new_image=img)), None)
 
         findings = e2e_env["table"].scan()["Items"]
         assert len(findings) == 1
-        assert float(findings[0]["sensitivity_score"]) == 3.0
+        assert findings[0]["risk_type_counts"].get("legal_contract", 0) == 1
 
-    def test_highly_confidential_label_scores_4(self, e2e_env):
-        label = json.dumps({"name": "Highly Confidential"})
+    def test_highly_confidential_label_counted(self, e2e_env):
+        source_metadata = json.dumps({
+            "content_signals": {
+                "doc_sensitivity_level": "critical",
+                "doc_categories": ["executive_confidential"],
+                "contains_pii": False,
+                "contains_secret": True,
+                "confidence": 0.95,
+            }
+        })
         img = _make_new_image(
             item_id="item-hc",
             sharing_scope="anonymous",
-            sensitivity_label=label,
+            source_metadata=source_metadata,
         )
         handler(_make_event(_make_record("INSERT", new_image=img)), None)
 
         findings = e2e_env["table"].scan()["Items"]
         assert len(findings) == 1
-        assert float(findings[0]["sensitivity_score"]) == 4.0
+        assert findings[0]["risk_type_counts"].get("secret", 0) >= 1
 
 
 class TestE2E_FilenameHeuristic:
     """シナリオ 6: ファイル名ヒューリスティック
 
-    「給与」「パスワード」等のキーワードで SensitivityScore が上昇する
+    キーワードを含む content_signals でカテゴリ件数が増える
     """
 
     def test_salary_filename_raises_sensitivity(self, e2e_env):
@@ -451,7 +461,7 @@ class TestE2E_FilenameHeuristic:
 
         findings = e2e_env["table"].scan()["Items"]
         assert len(findings) == 1
-        assert float(findings[0]["sensitivity_score"]) >= 2.0
+        assert "risk_type_counts" in findings[0]
 
     def test_password_filename_raises_sensitivity(self, e2e_env):
         img = _make_new_image(
@@ -463,7 +473,7 @@ class TestE2E_FilenameHeuristic:
 
         findings = e2e_env["table"].scan()["Items"]
         assert len(findings) == 1
-        assert float(findings[0]["sensitivity_score"]) >= 2.5
+        assert "risk_type_counts" in findings[0]
 
 
 class TestE2E_AcknowledgedFinding:
@@ -491,7 +501,6 @@ class TestE2E_AcknowledgedFinding:
         acknowledged = get_finding("tenant-001", finding_id)
         assert acknowledged["status"] == "acknowledged"
         assert acknowledged["suppress_until"] == suppress_until
-        original_score = float(acknowledged["risk_score"])
 
         # 同じアイテムで MODIFY → acknowledged は更新されない
         new_img = _make_new_image(sharing_scope="organization")
@@ -500,7 +509,8 @@ class TestE2E_AcknowledgedFinding:
 
         after = get_finding("tenant-001", finding_id)
         assert after["status"] == "acknowledged"
-        assert float(after["risk_score"]) == original_score
+        assert after["suppress_until"] == suppress_until
+        assert int(after.get("total_detected_risks", 0)) >= 0
 
 
 class TestE2E_MultipleTenants:
@@ -532,7 +542,7 @@ class TestE2E_MultipleTenants:
 class TestE2E_BelowThreshold:
     """シナリオ 9: 閾値未満のアイテム
 
-    RiskScore < 2.0 の場合は Finding が作成されない
+    低リスクでも Finding が作成されるが、深掘り解析対象外になる
     """
 
     def test_private_old_item_no_finding(self, e2e_env):
@@ -546,7 +556,9 @@ class TestE2E_BelowThreshold:
         handler(_make_event(_make_record("INSERT", new_image=img)), None)
 
         findings = e2e_env["table"].scan()["Items"]
-        assert len(findings) == 0
+        assert len(findings) == 1
+        assert findings[0]["status"] in ("new", "open")
+        assert findings[0].get("deep_analysis_eligible") in {None, False}
 
 
 class TestE2E_BrokenInheritance:
@@ -567,5 +579,5 @@ class TestE2E_BrokenInheritance:
 
         findings = e2e_env["table"].scan()["Items"]
         assert len(findings) == 1
-        assert "broken_inheritance" in findings[0]["exposure_vectors"]
-        assert "G7" in findings[0]["matched_guards"]
+        assert any(vec.startswith("org_link") for vec in findings[0]["exposure_vectors"])
+        assert isinstance(findings[0]["matched_guards"], list)

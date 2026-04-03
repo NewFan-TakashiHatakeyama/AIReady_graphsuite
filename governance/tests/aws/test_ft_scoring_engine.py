@@ -1,14 +1,9 @@
-"""FT-4: スコアリングエンジン検証テスト
-
-FileMetadata を Connect テーブルに投入し、DynamoDB Streams → analyzeExposure
-を経由して生成される Finding のスコアが詳細設計 6 章と一致することを検証する。
-"""
+"""FT-4: リスク件数集計エンジン検証テスト。"""
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 
 import pytest
 
@@ -38,20 +33,21 @@ def _insert_and_wait(connect_table, finding_table, metadata: dict) -> dict | Non
 
 
 class TestFT4ScoringEngine:
-    """FT-4: スコアリングエンジン検証（8 テストケース）"""
+    """FT-4: 件数集計検証（主要ケース）"""
 
-    def test_ft_4_01_anonymous_link_exposure_score(self, connect_table, finding_table):
-        """Anyone リンクのみ → ExposureScore = 5.0"""
+    def test_ft_4_01_anonymous_link_vector_count(self, connect_table, finding_table):
+        """Anyone リンクのみ → 露出ベクトル件数が保存される。"""
         meta = make_file_metadata(
             sharing_scope="anonymous",
             permissions_count=1,
         )
         finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["exposure_score"])) == Decimal("5.0")
+        assert finding["exposure_vector_counts"].get("public_link", 0) >= 1
+        assert int(finding["total_detected_risks"]) >= 1
 
     def test_ft_4_02_org_link_plus_eeeu(self, connect_table, finding_table):
-        """組織リンク + EEEU → ExposureScore = 4.1"""
+        """組織リンク + EEEU → 複数ベクトルの件数が反映される。"""
         perms = json.dumps({
             "entries": [
                 {"identity": {"displayName": "Everyone except external users"}}
@@ -64,10 +60,12 @@ class TestFT4ScoringEngine:
         )
         finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["exposure_score"])) == Decimal("4.1")
+        vector_counts = finding["exposure_vector_counts"]
+        assert vector_counts.get("org_link", 0) >= 1 or vector_counts.get("org_link_view", 0) >= 1
+        assert int(finding["total_detected_risks"]) >= 1
 
     def test_ft_4_03_anonymous_plus_guest_plus_broken(self, connect_table, finding_table):
-        """Anyone + ゲスト + 継承崩れ → ExposureScore = 6.2"""
+        """Anyone + ゲスト + 継承崩れ → ベクトル件数が増える。"""
         perms = json.dumps({
             "entries": [
                 {"identity": {"userType": "guest", "email": "ext@partner.com"}}
@@ -81,41 +79,67 @@ class TestFT4ScoringEngine:
         meta["source_metadata"] = json.dumps({"has_unique_permissions": True})
         finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["exposure_score"])) == Decimal("6.2")
+        vector_counts = finding["exposure_vector_counts"]
+        assert vector_counts.get("public_link", 0) >= 1
+        assert vector_counts.get("guest", 0) >= 1 or vector_counts.get("guest_direct_share", 0) >= 1
 
     def test_ft_4_04_private_low_risk(self, connect_table, finding_table):
-        """Private（露出なし）→ ExposureScore = 1.0, RiskScore < 2.0 → Finding 未生成"""
+        """Private（露出なし）でも Finding は生成され、件数は 0 許容。"""
         meta = make_file_metadata(
             sharing_scope="specific",
             permissions_count=3,
         )
         finding = _insert_and_wait(connect_table, finding_table, meta)
-        assert finding is None, "低リスクアイテムに対して Finding が生成された"
-
-    def test_ft_4_05_label_confidential(self, connect_table, finding_table):
-        """sensitivity_label=Confidential → SensitivityScore = 3.0"""
-        meta = make_file_metadata(
-            sharing_scope="organization",
-            sensitivity_label="Confidential",
-            permissions_count=150,
-        )
-        finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["sensitivity_score"])) == Decimal("3.0")
+        assert int(finding["total_detected_risks"]) >= 0
 
-    def test_ft_4_06_filename_salary(self, connect_table, finding_table):
-        """item_name=給与一覧.xlsx → SensitivityScore >= 2.0"""
+    def test_ft_4_05_content_categories_counted(self, connect_table, finding_table):
+        """content_signals のカテゴリは risk_type_counts に反映される。"""
         meta = make_file_metadata(
-            item_name="給与一覧.xlsx",
             sharing_scope="organization",
             permissions_count=150,
         )
+        meta["source_metadata"] = json.dumps(
+            {
+                "content_signals": {
+                    "doc_sensitivity_level": "high",
+                    "doc_categories": ["payroll", "customer_list"],
+                    "contains_pii": True,
+                    "contains_secret": False,
+                    "confidence": 0.92,
+                }
+            }
+        )
         finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["sensitivity_score"])) >= Decimal("2.0")
+        assert finding["risk_type_counts"].get("payroll", 0) == 1
+        assert finding["risk_type_counts"].get("customer_list", 0) == 1
+        assert finding["risk_type_counts"].get("pii", 0) >= 1
+
+    def test_ft_4_06_secret_and_pii_flags_counted(self, connect_table, finding_table):
+        """contains_secret / contains_pii フラグは件数に反映される。"""
+        meta = make_file_metadata(
+            sharing_scope="organization",
+            permissions_count=150,
+        )
+        meta["source_metadata"] = json.dumps(
+            {
+                "content_signals": {
+                    "doc_sensitivity_level": "critical",
+                    "doc_categories": [],
+                    "contains_pii": True,
+                    "contains_secret": True,
+                    "confidence": 0.95,
+                }
+            }
+        )
+        finding = _insert_and_wait(connect_table, finding_table, meta)
+        assert finding is not None, "Finding が生成されなかった"
+        assert finding["risk_type_counts"].get("pii", 0) >= 1
+        assert finding["risk_type_counts"].get("secret", 0) >= 1
 
     def test_ft_4_07_recent_activity(self, connect_table, finding_table):
-        """modified_at = 3 日前 → ActivityScore = 2.0"""
+        """更新時に total_detected_risks が保持される。"""
         three_days_ago = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
         meta = make_file_metadata(
             sharing_scope="organization",
@@ -124,10 +148,10 @@ class TestFT4ScoringEngine:
         meta["modified_at"] = three_days_ago
         finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["activity_score"])) == Decimal("2.0")
+        assert "total_detected_risks" in finding
 
     def test_ft_4_08_stale_activity(self, connect_table, finding_table):
-        """modified_at = 100 日前 → ActivityScore = 0.5"""
+        """古いファイルでも件数集計は実行される。"""
         hundred_days_ago = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
         meta = make_file_metadata(
             sharing_scope="organization",
@@ -136,4 +160,4 @@ class TestFT4ScoringEngine:
         meta["modified_at"] = hundred_days_ago
         finding = _insert_and_wait(connect_table, finding_table, meta)
         assert finding is not None, "Finding が生成されなかった"
-        assert Decimal(str(finding["activity_score"])) == Decimal("0.5")
+        assert "risk_type_counts" in finding

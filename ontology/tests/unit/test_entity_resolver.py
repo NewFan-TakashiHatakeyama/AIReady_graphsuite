@@ -4,46 +4,62 @@ from src.handlers import entity_resolver
 from src.models.entity_candidate import EntityCandidate
 
 
-class _Cursor:
-    def __init__(self, conn):
-        self._conn = conn
+def test_process_document_message_passes_surface_and_context_to_llm_mapper(monkeypatch):
+    captured = {}
 
-    def __enter__(self):
-        return self
+    def _stub_mapper(label: str, *, surface_form: str = "", context_snippet: str = "") -> str:
+        captured["label"] = label
+        captured["surface_form"] = surface_form
+        captured["context_snippet"] = context_snippet
+        return "project"
 
-    def __exit__(self, exc_type, exc, tb):
-        return False
+    monkeypatch.setattr(entity_resolver, "_map_label_to_entity_type", _stub_mapper)
+    message = {
+        "message_type": "entity_resolution_document_request",
+        "source": "document_analysis",
+        "tenant_id": "tenant-1",
+        "source_item_id": "item-1",
+        "entity_candidates": [
+            {
+                "surface_form": "Project Atlas",
+                "ner_label": "ORG",
+                "context_snippet": "Project Atlas rollout in Q4.",
+                "confidence": 0.8,
+            }
+        ],
+    }
 
-    def execute(self, sql, params=None):
-        self._conn.executed.append((sql, params))
+    expanded = entity_resolver._process_document_message(message)
 
-    def fetchone(self):
-        if self._conn.fetchone_results:
-            return self._conn.fetchone_results.pop(0)
-        return None
-
-    def fetchall(self):
-        if self._conn.fetchall_results:
-            return self._conn.fetchall_results.pop(0)
-        return []
+    assert len(expanded) == 1
+    assert expanded[0].entity_type == "project"
+    assert captured["label"] == "ORG"
+    assert captured["surface_form"] == "Project Atlas"
+    assert captured["context_snippet"] == "Project Atlas rollout in Q4."
 
 
-class _Conn:
-    def __init__(self):
-        self.executed = []
-        self.fetchone_results = []
-        self.fetchall_results = []
-        self.commits = 0
-        self.rollbacks = 0
+class _Table:
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, str], dict] = {}
 
-    def cursor(self):
-        return _Cursor(self)
+    def get_item(self, Key: dict) -> dict:
+        item = self.items.get((Key["tenant_id"], Key["entity_id"]))
+        if item is None:
+            return {}
+        return {"Item": dict(item)}
 
-    def commit(self):
-        self.commits += 1
+    def put_item(self, Item: dict) -> dict:
+        self.items[(Item["tenant_id"], Item["entity_id"])] = dict(Item)
+        return {}
 
-    def rollback(self):
-        self.rollbacks += 1
+
+class _Dynamo:
+    def __init__(self, table: _Table) -> None:
+        self._table = table
+
+    def Table(self, name: str) -> _Table:
+        assert name == "entity-master"
+        return self._table
 
 
 def _candidate(**overrides) -> EntityCandidate:
@@ -69,142 +85,30 @@ def _candidate(**overrides) -> EntityCandidate:
     return c
 
 
-def test_create_entity_pii_uses_encryption_sql(monkeypatch) -> None:
-    conn = _Conn()
-    cur = conn.cursor()
-    monkeypatch.setattr(entity_resolver, "generate_entity_id", lambda _t: "pii_person_fixed")
-    candidate = _candidate(pii_flag=True, pii_category="person_name")
+def test_resolve_entity_create_then_match(monkeypatch) -> None:
+    table = _Table()
+    monkeypatch.setenv("ENTITY_MASTER_TABLE", "entity-master")
+    monkeypatch.setattr(entity_resolver, "_dynamodb_resource", _Dynamo(table))
+    monkeypatch.setattr(entity_resolver, "publish_metric", lambda *args, **kwargs: None)
 
-    entity_id = entity_resolver._create_entity(
-        cur=cur, candidate=candidate, encryption_key="secret-key"
-    )
-    assert entity_id == "pii_person_fixed"
-    assert "pgp_sym_encrypt" in conn.executed[-1][0]
-
-
-def test_create_entity_non_pii_uses_plain_text_columns(monkeypatch) -> None:
-    conn = _Conn()
-    cur = conn.cursor()
-    monkeypatch.setattr(entity_resolver, "generate_entity_id", lambda _t: "org_fixed")
-    candidate = _candidate(
-        pii_flag=False,
-        entity_type="organization",
-        normalized_form="ACME Corp",
-        extraction_source="ner",
-    )
-
-    entity_id = entity_resolver._create_entity(
-        cur=cur, candidate=candidate, encryption_key=""
-    )
-    assert entity_id == "org_fixed"
-    sql, params = conn.executed[-1]
-    assert "canonical_value_text" in sql
-    assert params[3] == "ACME Corp"
-
-
-def test_resolve_entity_match_path_adds_alias_and_commits(monkeypatch) -> None:
-    conn = _Conn()
     candidate = _candidate()
+    first = entity_resolver._resolve_entity(candidate)
+    second = entity_resolver._resolve_entity(candidate)
 
-    monkeypatch.setattr(
-        entity_resolver,
-        "_find_existing_by_hash",
-        lambda **kwargs: {"entity_id": "ent-existing"},
-    )
-    monkeypatch.setattr(
-        entity_resolver,
-        "_add_alias",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(
-        entity_resolver,
-        "_update_entity_after_match",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(
-        entity_resolver,
-        "_insert_audit_log",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(
-        entity_resolver,
-        "check_pii_aggregation_alert",
-        lambda **kwargs: None,
-    )
-    monkeypatch.setattr(entity_resolver, "publish_metric", lambda *args, **kwargs: None)
-
-    result = entity_resolver._resolve_entity(conn, candidate, "secret-key")
-    assert result == {"action": "matched", "entity_id": "ent-existing"}
-    assert conn.commits == 1
-    assert conn.rollbacks == 0
+    assert first["action"] == "created"
+    assert second["action"] == "matched"
+    saved = table.items[("tenant-1", first["entity_id"])]
+    assert saved["mention_count"] == 6
 
 
-def test_resolve_entity_create_path_commits(monkeypatch) -> None:
-    conn = _Conn()
-    candidate = _candidate(
-        pii_flag=False, entity_type="organization", extraction_source="ner"
-    )
-
-    monkeypatch.setattr(entity_resolver, "_find_existing_by_hash", lambda **kwargs: None)
-    monkeypatch.setattr(entity_resolver, "_find_blocking_candidates", lambda **kwargs: [])
-    monkeypatch.setattr(entity_resolver, "_create_entity", lambda **kwargs: "ent-new")
-    monkeypatch.setattr(entity_resolver, "_add_alias", lambda **kwargs: None)
-    monkeypatch.setattr(entity_resolver, "_insert_audit_log", lambda **kwargs: None)
-    monkeypatch.setattr(entity_resolver, "publish_metric", lambda *args, **kwargs: None)
-
-    result = entity_resolver._resolve_entity(conn, candidate, "")
-    assert result == {"action": "created", "entity_id": "ent-new"}
-    assert conn.commits == 1
-    assert conn.rollbacks == 0
+def test_resolve_entity_without_projection_table_is_skipped(monkeypatch) -> None:
+    monkeypatch.delenv("ENTITY_MASTER_TABLE", raising=False)
+    result = entity_resolver._resolve_entity(_candidate())
+    assert result["action"] == "skipped"
 
 
-def test_resolve_entity_rolls_back_on_error(monkeypatch) -> None:
-    conn = _Conn()
-    candidate = _candidate()
-    monkeypatch.setattr(entity_resolver, "_find_existing_by_hash", lambda **kwargs: None)
-    monkeypatch.setattr(entity_resolver, "_find_blocking_candidates", lambda **kwargs: [])
-    monkeypatch.setattr(
-        entity_resolver,
-        "_create_entity",
-        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-    monkeypatch.setattr(entity_resolver, "publish_metric", lambda *args, **kwargs: None)
-
-    try:
-        entity_resolver._resolve_entity(conn, candidate, "secret")
-    except RuntimeError as exc:
-        assert str(exc) == "boom"
-    else:
-        raise AssertionError("RuntimeError was not raised")
-
-    assert conn.commits == 0
-    assert conn.rollbacks == 1
-
-
-def test_check_pii_aggregation_alert_publishes_sns(monkeypatch) -> None:
-    conn = _Conn()
-    conn.fetchone_results.append({"alias_count": 5})
-    monkeypatch.setenv("ALERT_TOPIC_ARN", "arn:aws:sns:ap-northeast-1:123456789012:topic")
-
-    published = []
-
-    class _SnsClient:
-        def publish(self, **kwargs):
-            published.append(kwargs)
-
-    class _Boto3:
-        @staticmethod
-        def client(service_name):
-            assert service_name == "sns"
-            return _SnsClient()
-
-    monkeypatch.setattr(entity_resolver, "boto3", _Boto3(), raising=False)
-    monkeypatch.setattr(entity_resolver, "publish_metric", lambda *args, **kwargs: None)
-
-    entity_resolver.check_pii_aggregation_alert(
-        conn=conn,
-        entity_id="ent-1",
-        entity_type="person",
-        tenant_id="tenant-1",
-    )
-    assert len(published) == 1
+def test_stable_entity_id_is_deterministic() -> None:
+    one = entity_resolver._stable_entity_id("person", "Alice")
+    two = entity_resolver._stable_entity_id("person", "Alice")
+    assert one == two
+    assert one.startswith("person_")

@@ -22,14 +22,27 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+TOKYO_TZ = ZoneInfo("Asia/Tokyo")
+EXTERNAL_USER_TYPES = frozenset({"guest", "external"})
+EDITABLE_ROLES = frozenset({"write", "edit", "owner", "manage", "fullcontrol"})
 
 
 def _safe_get_nested(obj: dict, *keys: str, default: Any = "") -> Any:
-    """ネストされた dict から安全に値を取得する"""
+    """ネストされた dict から安全に値を取得する。
+
+    Args:
+        obj: 参照元辞書
+        *keys: たどるキー列
+        default: キー不在時の既定値
+
+    Returns:
+        取得した値。存在しない場合は default
+    """
     current = obj
     for key in keys:
         if isinstance(current, dict):
@@ -40,7 +53,14 @@ def _safe_get_nested(obj: dict, *keys: str, default: Any = "") -> Any:
 
 
 def _extract_identity(identity_set: dict[str, Any]) -> dict[str, str]:
-    """IdentitySet から user/application/device 情報を抽出する"""
+    """IdentitySet から user/application/device/group 情報を抽出する。
+
+    Args:
+        identity_set: Graph の IdentitySet オブジェクト
+
+    Returns:
+        抽出した主体情報の辞書
+    """
     result = {}
     for key in ("user", "application", "device", "group"):
         identity = identity_set.get(key)
@@ -81,11 +101,153 @@ def determine_sharing_scope(permissions: list[dict[str, Any]]) -> str:
     return scope
 
 
+def _extract_domain(email: str) -> str:
+    if "@" not in email:
+        return ""
+    return email.rsplit("@", 1)[-1].strip().lower()
+
+
+def _normalize_roles(roles: Any) -> list[str]:
+    if not isinstance(roles, list):
+        return []
+    normalized = {
+        str(role).strip().lower()
+        for role in roles
+        if str(role).strip()
+    }
+    return sorted(normalized)
+
+
+def _extract_permission_principals(permission: dict[str, Any]) -> list[dict[str, str]]:
+    principals: list[dict[str, str]] = []
+
+    def _append_principal(user_obj: Any) -> None:
+        if not isinstance(user_obj, dict):
+            return
+        principal = {
+            "id": str(user_obj.get("id") or "").strip(),
+            "display_name": str(user_obj.get("displayName") or "").strip(),
+            "email": str(user_obj.get("email") or "").strip(),
+            "user_type": str(user_obj.get("userType") or "").strip().lower(),
+        }
+        if principal["id"] or principal["email"] or principal["display_name"]:
+            principals.append(principal)
+
+    granted_to_v2 = permission.get("grantedToV2")
+    if isinstance(granted_to_v2, dict):
+        _append_principal(granted_to_v2.get("user"))
+
+    granted_to = permission.get("grantedTo")
+    if isinstance(granted_to, dict):
+        _append_principal(granted_to.get("user"))
+
+    for key in ("grantedToIdentitiesV2", "grantedToIdentities"):
+        identities = permission.get(key)
+        if isinstance(identities, list):
+            for identity in identities:
+                if isinstance(identity, dict):
+                    _append_principal(identity.get("user"))
+
+    deduped = {}
+    for p in principals:
+        dedupe_key = (p.get("id", ""), p.get("email", ""), p.get("display_name", ""))
+        deduped[dedupe_key] = p
+    return sorted(
+        deduped.values(),
+        key=lambda p: (p.get("email", ""), p.get("id", ""), p.get("display_name", "")),
+    )
+
+
+def _is_external_principal(
+    principal: dict[str, str],
+    tenant_domains: set[str],
+) -> bool:
+    user_type = principal.get("user_type", "").strip().lower()
+    if user_type in EXTERNAL_USER_TYPES:
+        return True
+
+    email = principal.get("email", "").strip().lower()
+    if not email:
+        return False
+    if "#ext#" in email:
+        return True
+
+    domain = _extract_domain(email)
+    if domain and tenant_domains:
+        return domain not in tenant_domains
+    return False
+
+
+def build_source_metadata(
+    permissions: list[dict[str, Any]],
+    tenant_domains: list[str] | None = None,
+) -> dict[str, Any]:
+    """A/B/D 判定向けの source_metadata を構築する。"""
+    domain_set = {
+        str(domain).strip().lower()
+        for domain in (tenant_domains or [])
+        if str(domain).strip()
+    }
+    external_recipients: set[str] = set()
+    org_edit_links: set[str] = set()
+    anonymous_links: set[str] = set()
+    permission_targets: list[dict[str, Any]] = []
+    has_unique_permissions = False
+
+    for perm in permissions:
+        link = perm.get("link", {}) if isinstance(perm.get("link"), dict) else {}
+        link_scope = str(link.get("scope") or "").strip().lower()
+        link_type = str(link.get("type") or "").strip().lower()
+        link_url = str(link.get("webUrl") or "").strip()
+        roles = _normalize_roles(perm.get("roles"))
+        editable = bool(EDITABLE_ROLES.intersection(roles)) or link_type == "edit"
+
+        inherited_from = perm.get("inheritedFrom")
+        if inherited_from in (None, {}, ""):
+            has_unique_permissions = True
+
+        if link_scope == "anonymous" and link_url:
+            anonymous_links.add(link_url)
+        if link_scope == "organization" and editable and link_url:
+            org_edit_links.add(link_url)
+
+        principals = _extract_permission_principals(perm)
+        for principal in principals:
+            email = principal.get("email", "").strip().lower()
+            is_external = _is_external_principal(principal, domain_set)
+            if is_external and email:
+                external_recipients.add(email)
+
+            permission_targets.append({
+                "principal": email or principal.get("id", "") or principal.get("display_name", ""),
+                "role": roles[0] if roles else "read",
+                "is_external": is_external,
+                "scope": link_scope or "direct",
+            })
+
+    return {
+        "has_unique_permissions": has_unique_permissions,
+        "external_recipients": sorted(external_recipients),
+        "org_edit_links": sorted(org_edit_links),
+        "anonymous_links": sorted(anonymous_links),
+        "permission_targets": sorted(
+            permission_targets,
+            key=lambda target: (
+                str(target.get("principal", "")),
+                str(target.get("role", "")),
+                str(target.get("scope", "")),
+            ),
+        ),
+        "tenant_domains": sorted(domain_set),
+    }
+
+
 def normalize_item(
     item: dict[str, Any],
     permissions: list[dict[str, Any]],
     drive_id: str,
     tenant_id: str,
+    tenant_domains: list[str] | None = None,
 ) -> dict[str, Any]:
     """DriveItem + Permissions を正規化し、DynamoDB 保存用の dict を返す
 
@@ -100,7 +262,7 @@ def normalize_item(
     Returns:
         DynamoDB に保存する正規化済み dict
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(TOKYO_TZ).isoformat()
     item_id = item.get("id", "")
     is_deleted = item.get("deleted") is not None
     is_folder = item.get("folder") is not None
@@ -139,6 +301,7 @@ def normalize_item(
     malware_info = item.get("malware", {})
 
     # ── 正規化結果 ──
+    source_metadata = build_source_metadata(permissions, tenant_domains=tenant_domains)
     metadata: dict[str, Any] = {
         # ── Primary Key ──
         "drive_id": drive_id,
@@ -149,9 +312,11 @@ def normalize_item(
 
         # ── 基本情報 ──
         "name": item.get("name", ""),
+        "item_name": item.get("name", ""),
         "description": item.get("description", ""),
         "size": item.get("size", 0),
         "web_url": item.get("webUrl", ""),
+        "source": "m365",
         "web_dav_url": item.get("webDavUrl", ""),
         "etag": item.get("eTag", ""),
         "ctag": item.get("cTag", ""),
@@ -205,6 +370,7 @@ def normalize_item(
         "shared_info": json.dumps(shared_info) if shared_info else "",
         "permissions": json.dumps(permissions),
         "permissions_count": len(permissions),
+        "source_metadata": json.dumps(source_metadata, ensure_ascii=False),
 
         # ── SharePoint 固有 ──
         "sharepoint_ids": json.dumps(sharepoint_ids) if sharepoint_ids else "",
@@ -282,12 +448,14 @@ def normalize_deleted_item(
     Returns:
         DynamoDB に保存する正規化済み dict
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(TOKYO_TZ).isoformat()
     return {
         "drive_id": drive_id,
         "item_id": item.get("id", ""),
         "tenant_id": tenant_id,
         "name": item.get("name", ""),
+        "item_name": item.get("name", ""),
+        "source": "m365",
         "is_file": item.get("file") is not None,
         "is_folder": item.get("folder") is not None,
         "is_deleted": True,

@@ -1,80 +1,31 @@
-"""スコアリングエンジン — ExposureScore / SensitivityScore / RiskScore 算出
-
-詳細設計 6.1–6.5 節準拠
-"""
+"""Risk aggregation helpers based on detection counts."""
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from typing import Any
 
-from services.exposure_vectors import FileMetadata, extract_exposure_vectors
-from shared.config import SSM_MAX_EXPOSURE_SCORE, get_ssm_float
-from shared.logger import get_logger
+from services.exposure_vectors import FileMetadata, extract_exposure_vectors, parse_permissions
 
-logger = get_logger(__name__)
-
-# ─── ExposureScore 重み定義 ───
-
-EXPOSURE_WEIGHTS: dict[str, float] = {
-    "public_link": 5.0,
-    "guest": 4.0,
-    "all_users": 3.5,
-    "org_link": 3.0,
-    "external_domain": 3.0,
-    "broken_inheritance": 2.0,
-    "excessive_permissions": 1.5,
+ROLE_WEIGHTS: dict[str, float] = {
+    "view": 0.20,
+    "read": 0.20,
+    "reader": 0.20,
+    "comment": 0.35,
+    "commenter": 0.35,
+    "edit": 0.60,
+    "write": 0.60,
+    "writer": 0.60,
+    "owner": 1.00,
+    "manage": 1.00,
+    "fullcontrol": 1.00,
 }
-
-# ─── SensitivityScore: ラベル名 → スコアマッピング ───
-
-LABEL_SCORE_MAP: dict[str, float] = {
-    "Highly Confidential": 4.0,
-    "Confidential": 3.0,
-    "Internal": 2.0,
-    "General": 1.0,
-    "Public": 1.0,
-    "極秘": 4.0,
-    "秘": 3.0,
-    "社内限定": 2.0,
-    "一般": 1.0,
-}
-
-# ─── SensitivityScore: ファイル名ヒューリスティック ───
-
-SENSITIVE_FILENAME_PATTERNS: list[tuple[str, float]] = [
-    (r"(?i)(給与|salary|payroll)", 2.0),
-    (r"(?i)(契約|contract|agreement)", 2.0),
-    (r"(?i)(見積|quote|estimate)", 1.5),
-    (r"(?i)(人事|hr|personnel)", 2.0),
-    (r"(?i)(顧客|customer|client).*(?:リスト|list|一覧)", 2.0),
-    (r"(?i)(パスワード|password|credential)", 2.5),
-    (r"(?i)(機密|confidential|secret)", 2.5),
-    (r"(?i)(予算|budget)", 1.5),
-    (r"(?i)(個人情報|PII|個人データ)", 2.5),
-]
-
-# ─── SensitivityScore: PII 密度スコア ───
-
-PII_DENSITY_SCORES: dict[str, float] = {
-    "high": 4.0,
-    "medium": 3.5,
-    "low": 2.5,
-    "none": 1.0,
-}
-
-# ─── RiskScore 閾値 ───
-
-RISK_SCORE_THRESHOLD_DEFAULT = 2.0
-
 
 @dataclass
 class ExposureResult:
     score: float
     vectors: list[str]
-    details: dict[str, float] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -84,161 +35,210 @@ class SensitivityResult:
     is_preliminary: bool = True
 
 
-# ─── ExposureScore 算出 (6.1) ───
+@dataclass
+class RiskAggregationResult:
+    risk_type_counts: dict[str, int] = field(default_factory=dict)
+    exposure_vector_counts: dict[str, int] = field(default_factory=dict)
+    total_detected_risks: int = 0
+    risk_level: str = "none"
+
+
+RISK_LEVEL_THRESHOLDS: tuple[tuple[int, str], ...] = (
+    (8, "critical"),
+    (5, "high"),
+    (2, "medium"),
+    (1, "low"),
+)
+
+RISK_TYPE_ALIASES: dict[str, str] = {
+    "highly_confidential": "high_sensitivity",
+    "confidential": "medium_sensitivity",
+    "pii_data": "pii",
+    "personal_data": "pii",
+    "credential": "secret",
+    "credentials": "secret",
+}
+
+
+def _categorize_permission_level(role_score: float) -> str:
+    if role_score >= ROLE_WEIGHTS["manage"]:
+        return "manage"
+    if role_score >= ROLE_WEIGHTS["edit"]:
+        return "edit"
+    if role_score >= ROLE_WEIGHTS["comment"]:
+        return "comment"
+    return "view"
 
 
 def calculate_exposure_score(metadata: FileMetadata) -> ExposureResult:
-    """ExposureScore を算出（最大要因ベース + 追加要因の加算）。"""
     vectors = extract_exposure_vectors(metadata)
+    permissions = parse_permissions(metadata.permissions)
+    vector_set = set(vectors)
 
-    if not vectors:
-        return ExposureResult(score=1.0, vectors=[], details={})
+    audience_scope_label = "individual"
+    audience_scope = 0.05
+    if "public_link" in vector_set:
+        audience_scope_label = "public"
+        audience_scope = 1.00
+    elif "all_users" in vector_set:
+        audience_scope_label = "organization"
+        audience_scope = 0.70
+    elif any(v in vector_set for v in {"guest", "guest_direct_share", "external_email_direct_share", "external_domain_share", "external_domain"}):
+        audience_scope_label = "external_org"
+        audience_scope = 0.85
+    elif "org_link" in vector_set:
+        audience_scope_label = "organization"
+        audience_scope = 0.55
 
-    weighted_scores = {v: EXPOSURE_WEIGHTS.get(v, 1.0) for v in vectors}
-    max_score = max(weighted_scores.values())
+    discoverability_label = "hidden"
+    discoverability = 0.10
+    if "public_link" in vector_set:
+        discoverability_label = "browsable"
+        discoverability = 1.00
+    elif "org_link" in vector_set:
+        discoverability_label = "link_only"
+        discoverability = 0.35
 
-    additional = sum(w * 0.2 for w in weighted_scores.values() if w < max_score)
+    role_scores: list[float] = []
+    for entry in permissions:
+        for r in entry.get("roles", []) or []:
+            role_scores.append(ROLE_WEIGHTS.get(str(r).strip().lower(), 0.20))
+    privilege_strength = sum(role_scores) / len(role_scores) if role_scores else 0.20
+    permission_max_level_score = max(role_scores) if role_scores else ROLE_WEIGHTS["view"]
 
-    max_exposure = _get_max_exposure_score()
-    final_score = min(max_score + additional, max_exposure)
+    externality_label = "internal_only"
+    externality = 0.00
+    if "public_link" in vector_set:
+        externality_label = "public_internet"
+        externality = 1.00
+    elif any(v in vector_set for v in {"external_domain_share", "external_domain"}):
+        externality_label = "external_domain"
+        externality = 0.80
+    elif any(v in vector_set for v in {"guest", "guest_direct_share", "external_email_direct_share"}):
+        externality_label = "external_named"
+        externality = 0.60
+
+    reshare_label = "none"
+    reshare = 0.10
+    if "org_link_editable" in vector_set or permission_max_level_score >= ROLE_WEIGHTS["edit"]:
+        reshare_label = "allowed"
+        reshare = 0.80
+
+    permission_outlier = 0.0
+    if int(metadata.permissions_count) > 10:
+        permission_outlier = min(1.0, max(0.0, (int(metadata.permissions_count) - 10) / 200.0))
+
+    exposure_composite = min(
+        1.0,
+        max(
+            0.0,
+        0.35 * audience_scope
+        + 0.25 * privilege_strength
+        + 0.15 * discoverability
+        + 0.15 * externality
+        + 0.05 * reshare
+            + 0.05 * permission_outlier,
+        ),
+    )
 
     return ExposureResult(
-        score=round(final_score, 2),
+        score=round(exposure_composite, 4),
         vectors=vectors,
-        details=weighted_scores,
+        details={
+            "audience_scope": audience_scope_label,
+            "audience_scope_score": round(audience_scope, 4),
+            "privilege_strength_score": round(privilege_strength, 4),
+            "permission_weighted_level": _categorize_permission_level(privilege_strength),
+            "permission_max_level": _categorize_permission_level(permission_max_level_score),
+            "permission_max_level_score": round(permission_max_level_score, 4),
+            "discoverability": discoverability_label,
+            "discoverability_score": round(discoverability, 4),
+            "externality": externality_label,
+            "externality_score": round(externality, 4),
+            "reshare_capability": reshare_label,
+            "reshare_capability_score": round(reshare, 4),
+            "permission_outlier_score": round(permission_outlier, 4),
+            "broken_inheritance_score": 0.0,
+        },
     )
 
 
-# ─── SensitivityScore 暫定算出 (6.2) ───
+def _normalize_risk_type(name: Any) -> str:
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        return ""
+    return RISK_TYPE_ALIASES.get(normalized, normalized)
 
 
-def calculate_preliminary_sensitivity(metadata: FileMetadata) -> SensitivityResult:
-    """暫定 SensitivityScore（ラベル + ファイル名ヒューリスティック）。"""
-    score = 1.0
-    factors: list[str] = []
-
-    if metadata.sensitivity_label:
-        label_name = _parse_label_name(metadata.sensitivity_label)
-        if label_name:
-            label_score = LABEL_SCORE_MAP.get(label_name, 1.0)
-            if label_score > score:
-                score = label_score
-                factors.append(f"label:{label_name}")
-
-    for pattern, weight in SENSITIVE_FILENAME_PATTERNS:
-        if re.search(pattern, metadata.item_name or ""):
-            if weight > score:
-                score = weight
-                factors.append(f"filename:{pattern}")
-
-    return SensitivityResult(score=score, factors=factors, is_preliminary=True)
-
-
-# ─── SensitivityScore 正式算出 (6.3) ───
+def calculate_risk_type_counts(content_signals: dict[str, Any] | None) -> dict[str, int]:
+    if not isinstance(content_signals, dict):
+        return {}
+    counts: dict[str, int] = {}
+    categories = content_signals.get("doc_categories", [])
+    if isinstance(categories, list):
+        for category in categories:
+            key = _normalize_risk_type(category)
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    level = str(content_signals.get("doc_sensitivity_level", "none")).strip().lower()
+    if level in {"low", "medium", "high", "critical"}:
+        key = f"sensitivity_{level}"
+        counts[key] = counts.get(key, 0) + 1
+    if bool(content_signals.get("contains_pii", False)):
+        counts["pii"] = counts.get("pii", 0) + 1
+    if bool(content_signals.get("contains_secret", False)):
+        counts["secret"] = counts.get("secret", 0) + 1
+    return dict(sorted(counts.items()))
 
 
-def calculate_sensitivity_score(
-    pii_results: dict,
-    secret_results: dict,
-    existing_label_score: float = 1.0,
-) -> float:
-    """正式 SensitivityScore（PII/Secret 検知結果に基づく）。
-
-    Args:
-        pii_results: PIIDetectionResult 相当の dict
-            {"detected": bool, "high_risk_detected": bool, "density": str}
-        secret_results: SecretDetectionResult 相当の dict
-            {"detected": bool}
-        existing_label_score: ラベルによるベーススコア
-    """
-    score = existing_label_score
-
-    if secret_results.get("detected", False):
-        score = max(score, 5.0)
-        return round(score, 2)
-
-    if pii_results.get("high_risk_detected", False):
-        score = max(score, 4.0)
-        return round(score, 2)
-
-    density = pii_results.get("density", "none")
-    density_score = PII_DENSITY_SCORES.get(density, 1.0)
-    score = max(score, density_score)
-
-    return round(score, 2)
+def calculate_exposure_vector_counts(vectors: list[str] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for vector in vectors or []:
+        key = str(vector or "").strip().lower()
+        if not key:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
 
 
-# ─── ActivityScore 算出 (6.4) ───
+def classify_risk_level(total_detected_risks: int) -> str:
+    for min_count, label in RISK_LEVEL_THRESHOLDS:
+        if int(total_detected_risks) >= min_count:
+            return label
+    return "none"
 
 
-def calculate_activity_score(metadata: FileMetadata) -> float:
-    """ActivityScore の簡易算出（modified_at ベース）。"""
-    if metadata.modified_at is None:
-        return 1.0
-
-    try:
-        modified = datetime.fromisoformat(metadata.modified_at.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        days_since = (now - modified).days
-
-        if days_since <= 7:
-            return 2.0
-        elif days_since <= 30:
-            return 1.5
-        elif days_since <= 90:
-            return 1.0
-        else:
-            return 0.5
-    except (ValueError, TypeError):
-        return 1.0
-
-
-# ─── RiskScore 総合算出 (6.5) ───
+def summarize_detected_risks(
+    *,
+    exposure_vectors: list[str] | None,
+    content_signals: dict[str, Any] | None = None,
+) -> RiskAggregationResult:
+    risk_type_counts = calculate_risk_type_counts(content_signals)
+    exposure_vector_counts = calculate_exposure_vector_counts(exposure_vectors)
+    total_detected_risks = sum(risk_type_counts.values()) + sum(exposure_vector_counts.values())
+    has_exposure_vectors = sum(exposure_vector_counts.values()) > 0
+    risk_level = classify_risk_level(total_detected_risks)
+    # Content-only detections (no sharing exposure vectors) should not escalate
+    # above low. This keeps low-risk labeling aligned with PoC operations.
+    if not has_exposure_vectors and total_detected_risks > 0:
+        risk_level = "low"
+    return RiskAggregationResult(
+        risk_type_counts=risk_type_counts,
+        exposure_vector_counts=exposure_vector_counts,
+        total_detected_risks=total_detected_risks,
+        risk_level=risk_level,
+    )
 
 
-def calculate_risk_score(
-    exposure: float,
-    sensitivity: float,
-    activity: float,
-    ai_amp: float,
-) -> float:
-    """RiskScore = ExposureScore x SensitivityScore x ActivityScore x AIAmplification"""
-    return round(exposure * sensitivity * activity * ai_amp, 2)
-
-
-def classify_risk_level(risk_score: float) -> str:
-    """RiskScore からリスクレベルを判定する。"""
-    if risk_score >= 50.0:
-        return "critical"
-    elif risk_score >= 20.0:
-        return "high"
-    elif risk_score >= 5.0:
-        return "medium"
-    elif risk_score >= 2.0:
-        return "low"
-    else:
-        return "none"
-
-
-# ─── ヘルパー ───
-
-
-def _parse_label_name(sensitivity_label: str | None) -> str | None:
-    """sensitivity_label フィールドからラベル名を抽出する。"""
-    if not sensitivity_label:
-        return None
-
-    try:
-        label_data = json.loads(sensitivity_label)
-        if isinstance(label_data, dict):
-            return label_data.get("name")
-        return str(label_data)
-    except (json.JSONDecodeError, TypeError):
-        return sensitivity_label
-
-
-def _get_max_exposure_score() -> float:
-    try:
-        return get_ssm_float(SSM_MAX_EXPOSURE_SCORE, default=10.0)
-    except Exception:
-        return 10.0
+def compute_ai_eligible(
+    risk_level: str,
+    total_detected_risks: int = 0,
+    pii_detected: bool = False,
+    secrets_detected: bool = False,
+) -> bool:
+    return (
+        str(risk_level).strip().lower() in {"high", "critical"}
+        and int(total_detected_risks) > 0
+        and not pii_detected
+        and not secrets_detected
+    )

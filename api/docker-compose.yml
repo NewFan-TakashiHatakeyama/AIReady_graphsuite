@@ -1,0 +1,16 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: graphsuite_api
+    command: python run_with_gunicorn.py
+    volumes:
+      - .:/app
+    ports:
+      - "9621:9621"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped

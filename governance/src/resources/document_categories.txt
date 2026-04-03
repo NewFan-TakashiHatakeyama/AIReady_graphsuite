@@ -1,0 +1,9 @@
+# Governance document category catalog (authoritative for LLM classification)
+# Format: <category_id>\t<display_name_ja>\t<usage_hint>
+payroll	給与情報	給与明細、賃金台帳、給与計算
+customer_list	顧客リスト	顧客名簿、顧客連絡先一覧
+customer_data	顧客データ	顧客属性情報、取引データ
+hr_evaluation	人事評価情報	人事評価表、査定コメント
+executive_confidential	経営機密	経営会議資料、M&A関連、事業戦略
+legal_contract	法務契約情報	契約書、合意書、覚書
+financial_statement_draft	財務諸表ドラフト	決算ドラフト、試算表、財務レビュー草案

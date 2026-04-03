@@ -33,24 +33,14 @@ GUARD_CATEGORIES: dict[str, GuardCategory] = {
         vectors=frozenset({
             "public_link",
             "org_link",
+            "org_link_editable",
             "guest",
+            "guest_direct_share",
+            "external_email_direct_share",
+            "external_domain_share",
             "external_domain",
             "excessive_permissions",
         }),
-        applicable_sources=frozenset({"m365", "box", "google_drive"}),
-    ),
-    "G7": GuardCategory(
-        guard_id="G7",
-        guard_name="ラベル適用状況ガード",
-        severity="high",
-        vectors=frozenset({"no_label", "broken_inheritance"}),
-        applicable_sources=frozenset({"m365", "box", "google_drive"}),
-    ),
-    "G9": GuardCategory(
-        guard_id="G9",
-        guard_name="生成AI露出ガード",
-        severity="medium",
-        vectors=frozenset({"ai_accessible"}),
         applicable_sources=frozenset({"m365", "box", "google_drive"}),
     ),
 }

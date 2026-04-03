@@ -46,6 +46,15 @@ from aws_cdk import (
 # 定数
 # ==========================================
 PROJECT = "AIReadyConnect"
+
+
+def _graphsuite_bucket_suffix(stack: Stack) -> str:
+    raw = (stack.node.try_get_context("graphsuiteS3BucketSuffix") or "").strip()
+    if not raw:
+        return ""
+    return raw if raw.startswith("-") else f"-{raw}"
+
+
 DOMAIN_NAME = "graphsuite.jp"
 WEBHOOK_DOMAIN = f"webhook.{DOMAIN_NAME}"
 HOSTED_ZONE_ID = "Z0824732TT6B0CPHB0FE"
@@ -182,6 +191,63 @@ class AIReadyConnectStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
         )
+        # --- MessageMetadata ---
+        table_message_metadata = dynamodb.Table(
+            self,
+            "MessageMetadata",
+            table_name=f"{PROJECT}-MessageMetadata",
+            partition_key=dynamodb.Attribute(
+                name="conversation_key", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="message_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            point_in_time_recovery=True,
+        )
+        table_message_metadata.add_global_secondary_index(
+            index_name="GSI-TenantModifiedAt",
+            partition_key=dynamodb.Attribute(
+                name="tenant_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="modified_at", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+        # --- Connections ---
+        table_connections = dynamodb.Table(
+            self,
+            "Connections",
+            table_name=f"{PROJECT}-Connections",
+            partition_key=dynamodb.Attribute(
+                name="tenant_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="connection_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        table_connections.add_global_secondary_index(
+            index_name="GSI-UpdatedAt",
+            partition_key=dynamodb.Attribute(
+                name="tenant_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="updated_at", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+        # Webhook が Graph subscriptionId から正しい connection_id を引く（複数接続テナント向け）
+        table_connections.add_global_secondary_index(
+            index_name="GSI-SubscriptionId",
+            partition_key=dynamodb.Attribute(
+                name="subscription_id", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
 
         # ==========================================
         # T-010: SNS + SQS + DLQ
@@ -210,6 +276,26 @@ class AIReadyConnectStack(Stack):
             ),
             removal_policy=RemovalPolicy.DESTROY,
         )
+        message_dlq = sqs.Queue(
+            self,
+            "MessageNotificationDLQ",
+            queue_name=f"{PROJECT}-MessageNotificationDLQ",
+            retention_period=Duration.days(14),
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        message_queue = sqs.Queue(
+            self,
+            "MessageNotificationQueue",
+            queue_name=f"{PROJECT}-MessageNotificationQueue",
+            visibility_timeout=Duration.seconds(300),
+            delivery_delay=Duration.seconds(5),
+            retention_period=Duration.days(1),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                max_receive_count=3,
+                queue=message_dlq,
+            ),
+            removal_policy=RemovalPolicy.DESTROY,
+        )
 
         # --- SNS Topic ---
         topic = sns.Topic(
@@ -221,6 +307,18 @@ class AIReadyConnectStack(Stack):
             sns_subs.SqsSubscription(
                 queue,
                 raw_message_delivery=True,
+                filter_policy={
+                    "resourceType": sns.SubscriptionFilter.string_filter(allowlist=["drive"])
+                },
+            )
+        )
+        topic.add_subscription(
+            sns_subs.SqsSubscription(
+                message_queue,
+                raw_message_delivery=True,
+                filter_policy={
+                    "resourceType": sns.SubscriptionFilter.string_filter(allowlist=["message"])
+                },
             )
         )
 
@@ -302,6 +400,44 @@ class AIReadyConnectStack(Stack):
             )
         )
 
+        # Connect API ロールへ CloudWatch Logs Insights 実行権限を付与（T-065）
+        # cdk context 例:
+        # {
+        #   "connect_api_role_arn": "arn:aws:iam::<account-id>:role/<api-role-name>"
+        # }
+        connect_api_role_arn = self.node.try_get_context("connect_api_role_arn")
+        if connect_api_role_arn:
+            connect_api_role = iam.Role.from_role_arn(
+                self,
+                "ConnectApiRole",
+                role_arn=str(connect_api_role_arn),
+                mutable=True,
+            )
+            connect_log_group_arns = [
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/{PROJECT}-pullFileMetadata:*",
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/{PROJECT}-receiveNotification:*",
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/{PROJECT}-renewSubscription:*",
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/{PROJECT}-renewAccessToken:*",
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/lambda/{PROJECT}-cleanupConnectionArtifacts:*",
+            ]
+            connect_api_role.add_to_principal_policy(
+                iam.PolicyStatement(
+                    sid="AllowConnectLogsInsightsStartQuery",
+                    effect=iam.Effect.ALLOW,
+                    actions=["logs:StartQuery"],
+                    resources=connect_log_group_arns,
+                )
+            )
+            # queryId ベース API はリソースを限定できないため "*" が必要。
+            connect_api_role.add_to_principal_policy(
+                iam.PolicyStatement(
+                    sid="AllowConnectLogsInsightsQueryLifecycle",
+                    effect=iam.Effect.ALLOW,
+                    actions=["logs:GetQueryResults", "logs:StopQuery"],
+                    resources=["*"],
+                )
+            )
+
         # SSM Parameter Store (read/write)
         lambda_role.add_to_policy(
             iam.PolicyStatement(
@@ -314,12 +450,13 @@ class AIReadyConnectStack(Stack):
                 resources=[
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/MSGraph*",
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/{PROJECT}/*",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/aiready/connect/*",
                 ],
             )
         )
 
         # DynamoDB
-        for table in [table_file_metadata, table_idempotency, table_delta_tokens]:
+        for table in [table_file_metadata, table_idempotency, table_delta_tokens, table_message_metadata, table_connections]:
             table.grant_read_write_data(lambda_role)
 
         # SNS Publish
@@ -327,14 +464,16 @@ class AIReadyConnectStack(Stack):
 
         # SQS Consume
         queue.grant_consume_messages(lambda_role)
+        message_queue.grant_consume_messages(lambda_role)
 
         # ==========================================
         # T-013: S3 バケット (Raw Payload)
         # ==========================================
+        _suffix = _graphsuite_bucket_suffix(self)
         raw_bucket = s3.Bucket(
             self,
             "RawPayloadBucket",
-            bucket_name=f"{PROJECT.lower()}-raw-payload-{self.account}",
+            bucket_name=f"{PROJECT.lower()}-raw-payload{_suffix}",
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
             lifecycle_rules=[
@@ -359,10 +498,12 @@ class AIReadyConnectStack(Stack):
             "FILE_METADATA_TABLE": table_file_metadata.table_name,
             "IDEMPOTENCY_TABLE": table_idempotency.table_name,
             "DELTA_TOKENS_TABLE": table_delta_tokens.table_name,
+            "MESSAGE_METADATA_TABLE": table_message_metadata.table_name,
             "NOTIFICATION_TOPIC_ARN": topic.topic_arn,
             "RAW_BUCKET": raw_bucket.bucket_name,
             "WEBHOOK_URL": f"https://{WEBHOOK_DOMAIN}",
             "LOG_LEVEL": "INFO",
+            "CONNECT_CONNECTIONS_TABLE": table_connections.table_name,
         }
 
         # 共通 Lambda Layer (requests + python-dotenv)
@@ -506,6 +647,40 @@ class AIReadyConnectStack(Stack):
                 report_batch_item_failures=True,
             )
         )
+        fn_pull_message_metadata = _lambda.Function(
+            self,
+            "PullMessageMetadata",
+            function_name=f"{PROJECT}-pullMessageMetadata",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="src.handlers.pull_message_metadata.lambda_handler",
+            code=_lambda.Code.from_asset(
+                code_root,
+                exclude=[
+                    "infra/*", "tests/*", "scripts/*", "Docs/*",
+                    ".env*", "*.md", "__pycache__", ".git*",
+                    "cdk.out/*", ".venv/*",
+                ],
+            ),
+            layers=[deps_layer],
+            role=lambda_role,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            ),
+            security_groups=[sg_lambda],
+            timeout=Duration.seconds(300),
+            memory_size=512,
+            environment=common_env,
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+        )
+        fn_pull_message_metadata.add_event_source(
+            lambda_event_sources.SqsEventSource(
+                message_queue,
+                batch_size=10,
+                max_batching_window=Duration.seconds(30),
+                report_batch_item_failures=True,
+            )
+        )
 
         # ==========================================
         # T-032: renew_subscription Lambda + EventBridge
@@ -547,6 +722,97 @@ class AIReadyConnectStack(Stack):
         )
 
         # ==========================================
+        # T-083: init_subscription Lambda
+        # ==========================================
+        fn_init_subscription = _lambda.Function(
+            self,
+            "InitSubscription",
+            function_name=f"{PROJECT}-initSubscription",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="src.handlers.init_subscription.lambda_handler",
+            code=_lambda.Code.from_asset(
+                code_root,
+                exclude=[
+                    "infra/*", "tests/*", "scripts/*", "Docs/*",
+                    ".env*", "*.md", "__pycache__", ".git*",
+                    "cdk.out/*", ".venv/*",
+                ],
+            ),
+            layers=[deps_layer],
+            role=lambda_role,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            ),
+            security_groups=[sg_lambda],
+            timeout=Duration.seconds(120),
+            memory_size=256,
+            environment=common_env,
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+        )
+
+        backfill_chat_env = {
+            **common_env,
+            "CONNECT_CHAT_BACKFILL_MAX_MESSAGES": "500",
+        }
+        fn_backfill_chat_messages = _lambda.Function(
+            self,
+            "BackfillChatMessages",
+            function_name=f"{PROJECT}-backfillChatMessages",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="src.handlers.backfill_chat_messages.lambda_handler",
+            code=_lambda.Code.from_asset(
+                code_root,
+                exclude=[
+                    "infra/*", "tests/*", "scripts/*", "Docs/*",
+                    ".env*", "*.md", "__pycache__", ".git*",
+                    "cdk.out/*", ".venv/*",
+                ],
+            ),
+            layers=[deps_layer],
+            role=lambda_role,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            ),
+            security_groups=[sg_lambda],
+            timeout=Duration.seconds(900),
+            memory_size=512,
+            environment=backfill_chat_env,
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+        )
+
+        # ==========================================
+        # T-090: cleanup_connection_artifacts Lambda
+        # ==========================================
+        fn_cleanup_connection_artifacts = _lambda.Function(
+            self,
+            "CleanupConnectionArtifacts",
+            function_name=f"{PROJECT}-cleanupConnectionArtifacts",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="src.handlers.cleanup_connection_artifacts.lambda_handler",
+            code=_lambda.Code.from_asset(
+                code_root,
+                exclude=[
+                    "infra/*", "tests/*", "scripts/*", "Docs/*",
+                    ".env*", "*.md", "__pycache__", ".git*",
+                    "cdk.out/*", ".venv/*",
+                ],
+            ),
+            layers=[deps_layer],
+            role=lambda_role,
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            ),
+            security_groups=[sg_lambda],
+            timeout=Duration.seconds(180),
+            memory_size=512,
+            environment=common_env,
+            log_retention=logs.RetentionDays.TWO_WEEKS,
+        )
+
+        # ==========================================
         # Outputs
         # ==========================================
         cdk.CfnOutput(self, "VpcId", value=vpc.vpc_id)
@@ -555,6 +821,8 @@ class AIReadyConnectStack(Stack):
         cdk.CfnOutput(self, "TopicArn", value=topic.topic_arn)
         cdk.CfnOutput(self, "QueueUrl", value=queue.queue_url)
         cdk.CfnOutput(self, "DlqUrl", value=dlq.queue_url)
+        cdk.CfnOutput(self, "MessageQueueUrl", value=message_queue.queue_url)
+        cdk.CfnOutput(self, "MessageDlqUrl", value=message_dlq.queue_url)
         cdk.CfnOutput(
             self, "FileMetadataTable", value=table_file_metadata.table_name
         )
@@ -570,6 +838,9 @@ class AIReadyConnectStack(Stack):
         )
         cdk.CfnOutput(
             self, "DeltaTokensTable", value=table_delta_tokens.table_name
+        )
+        cdk.CfnOutput(
+            self, "MessageMetadataTable", value=table_message_metadata.table_name
         )
         cdk.CfnOutput(self, "RawBucketName", value=raw_bucket.bucket_name)
         cdk.CfnOutput(self, "LambdaRoleArn", value=lambda_role.role_arn)
@@ -587,8 +858,30 @@ class AIReadyConnectStack(Stack):
             value=fn_pull_metadata.function_name,
         )
         cdk.CfnOutput(
+            self, "PullMessageMetadataFn",
+            value=fn_pull_message_metadata.function_name,
+        )
+        cdk.CfnOutput(
             self, "RenewSubscriptionFn",
             value=fn_renew_sub.function_name,
+        )
+        cdk.CfnOutput(
+            self, "ConnectConnectionsTable", value=table_connections.table_name
+        )
+        cdk.CfnOutput(
+            self, "InitSubscriptionFn",
+            value=fn_init_subscription.function_name,
+            export_name="ConnectInitSubscriptionLambdaName",
+        )
+        cdk.CfnOutput(
+            self, "BackfillChatMessagesFn",
+            value=fn_backfill_chat_messages.function_name,
+            export_name="ConnectBackfillChatMessagesLambdaName",
+        )
+        cdk.CfnOutput(
+            self, "CleanupConnectionArtifactsFn",
+            value=fn_cleanup_connection_artifacts.function_name,
+            export_name="ConnectCleanupConnectionArtifactsLambdaName",
         )
 
         # Phase 2 で参照するためインスタンス変数に保持
@@ -598,9 +891,13 @@ class AIReadyConnectStack(Stack):
         self.table_file_metadata = table_file_metadata
         self.table_idempotency = table_idempotency
         self.table_delta_tokens = table_delta_tokens
+        self.table_message_metadata = table_message_metadata
+        self.table_connections = table_connections
         self.topic = topic
         self.queue = queue
+        self.message_queue = message_queue
         self.dlq = dlq
+        self.message_dlq = message_dlq
         self.alb = alb
         self.listener = listener
         self.lambda_role = lambda_role

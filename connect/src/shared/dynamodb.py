@@ -6,18 +6,23 @@ get/put/冪等チェック/Delta Token 管理を提供する。
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import boto3
-from boto3.dynamodb.types import TypeSerializer
-
 from src.shared.config import get_config
+
+TOKYO_TZ = ZoneInfo("Asia/Tokyo")
 
 
 def _resource():
-    """DynamoDB resource（モジュールレベルで再利用）"""
+    """DynamoDB リソースを生成する。
+
+    Returns:
+        boto3 の DynamoDB リソース
+    """
     cfg = get_config()
     return boto3.resource("dynamodb", region_name=cfg.region)
 
@@ -31,6 +36,12 @@ def sanitize_for_dynamodb(obj: Any) -> Any:
 
     DynamoDB は float をサポートしないため Decimal に変換し、
     空文字列の属性値は None に変換する。
+
+    Args:
+        obj: 変換対象オブジェクト
+
+    Returns:
+        DynamoDB 保存可能な形式に変換したオブジェクト
     """
     if isinstance(obj, float):
         return Decimal(str(obj))
@@ -64,12 +75,36 @@ def put_file_metadata(item: dict[str, Any]) -> None:
 def get_file_metadata(drive_id: str, item_id: str) -> dict[str, Any] | None:
     """FileMetadata テーブルからアイテムを取得する
 
+    Args:
+        drive_id: ドライブ ID
+        item_id: アイテム ID
+
     Returns:
         メタデータ dict、存在しない場合は None
     """
     cfg = get_config()
     table = _resource().Table(cfg.file_metadata_table)
     resp = table.get_item(Key={"drive_id": drive_id, "item_id": item_id})
+    return resp.get("Item")
+
+
+def put_message_metadata(item: dict[str, Any]) -> None:
+    """MessageMetadata テーブルにアイテムを upsert する。
+
+    Args:
+        item: メッセージ正規化済みデータ
+    """
+    cfg = get_config()
+    table = _resource().Table(cfg.message_metadata_table)
+    sanitized = sanitize_for_dynamodb(item)
+    table.put_item(Item=sanitized)
+
+
+def get_message_metadata(conversation_key: str, message_id: str) -> dict[str, Any] | None:
+    """MessageMetadata テーブルからアイテムを取得する。"""
+    cfg = get_config()
+    table = _resource().Table(cfg.message_metadata_table)
+    resp = table.get_item(Key={"conversation_key": conversation_key, "message_id": message_id})
     return resp.get("Item")
 
 
@@ -109,7 +144,7 @@ def mark_as_processed(event_id: str, tenant_id: str = "") -> None:
         Item={
             "event_id": event_id,
             "tenant_id": tenant_id or cfg.tenant_id,
-            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "processed_at": datetime.now(TOKYO_TZ).isoformat(),
             "ttl": ttl,
         }
     )
@@ -121,6 +156,9 @@ def mark_as_processed(event_id: str, tenant_id: str = "") -> None:
 
 def get_delta_token(drive_id: str) -> str | None:
     """指定ドライブの Delta Token (deltaLink) を取得する
+
+    Args:
+        drive_id: ドライブ ID
 
     Returns:
         deltaLink URL 文字列、未設定の場合は None
@@ -145,6 +183,6 @@ def save_delta_token(drive_id: str, delta_link: str) -> None:
         Item={
             "drive_id": drive_id,
             "delta_link": delta_link,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(TOKYO_TZ).isoformat(),
         }
     )

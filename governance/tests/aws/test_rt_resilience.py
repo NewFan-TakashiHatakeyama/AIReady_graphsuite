@@ -17,9 +17,6 @@ import pytest
 from tests.aws.conftest import (
     ANALYZE_DLQ_NAME,
     ANALYZE_EXPOSURE_FN,
-    BATCH_SCORING_FN,
-    DETECT_DLQ_NAME,
-    DETECT_SENSITIVITY_FN,
     RAW_PAYLOAD_BUCKET,
     SENSITIVITY_QUEUE_NAME,
     TEST_TENANT_ID,
@@ -60,6 +57,7 @@ class TestRT1Resilience:
         )
 
     @pytest.mark.slow
+    @pytest.mark.skip(reason="detectSensitivity queue flow is retired in hard-cut mode")
     def test_rt_1_02_detect_dlq_receives_bad_message(
         self, sqs_client, detect_dlq_url
     ):
@@ -115,7 +113,7 @@ class TestRT1Resilience:
             item_id=item_id,
             item_name="missing_s3.txt",
             mime_type="text/plain",
-            raw_s3_key=f"raw/{TEST_TENANT_ID}/nonexistent-{uuid.uuid4().hex}/file.txt",
+            raw_s3_key=f"{TEST_TENANT_ID}/raw/nonexistent-{uuid.uuid4().hex}/file.txt",
         )
         connect_table.put_item(Item=metadata)
 
@@ -133,7 +131,7 @@ class TestRT1Resilience:
     ):
         """同一 FileMetadata を 2 回挿入しても Finding は 1 件のみ。"""
         item_id = f"item-rt104-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+        raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key, Body=b"idempotent test",
         )
@@ -172,7 +170,7 @@ class TestRT1Resilience:
         item_ids = []
         for i in range(count):
             item_id = f"item-rt105-{i:03d}-{uuid.uuid4().hex[:6]}"
-            raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+            raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
             s3_client.put_object(
                 Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
                 Body=f"concurrent test {i}".encode("utf-8"),
@@ -216,62 +214,20 @@ class TestRT1Resilience:
         duplicates = {k: v for k, v in item_counts.items() if v > 1}
         assert not duplicates, f"Duplicate Findings detected: {duplicates}"
 
-    def test_rt_1_06_dlq_message_retention(self, sqs_client, analyze_dlq_url, detect_dlq_url):
-        """DLQ のメッセージ保持期間が 14 日（1209600 秒）であること。"""
-        for dlq_url, name in [
-            (analyze_dlq_url, ANALYZE_DLQ_NAME),
-            (detect_dlq_url, DETECT_DLQ_NAME),
-        ]:
-            attrs = sqs_client.get_queue_attributes(
-                QueueUrl=dlq_url,
-                AttributeNames=["MessageRetentionPeriod"],
-            )["Attributes"]
-            retention = int(attrs.get("MessageRetentionPeriod", "0"))
-            assert retention == 1209600, (
-                f"{name}: retention={retention}s, expected 1209600s (14 days)"
-            )
-
-    def test_rt_1_07_batch_partial_failure(
-        self, connect_table, finding_table, lambda_client, s3_client
-    ):
-        """有効な FileMetadata と is_deleted の FileMetadata を混在させても batchScoring が正常処理。"""
-        valid_ids = []
-        deleted_ids = []
-
-        for i in range(3):
-            item_id = f"item-rt107-valid-{i}-{uuid.uuid4().hex[:6]}"
-            raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
-            s3_client.put_object(
-                Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
-                Body=f"valid item {i}".encode("utf-8"),
-            )
-            metadata = make_file_metadata(
-                tenant_id=TEST_TENANT_ID, item_id=item_id,
-                item_name=f"valid_{i}.txt", mime_type="text/plain",
-                is_deleted=False, raw_s3_key=raw_key,
-            )
-            connect_table.put_item(Item=metadata)
-            valid_ids.append(item_id)
-
-        for i in range(2):
-            item_id = f"item-rt107-del-{i}-{uuid.uuid4().hex[:6]}"
-            metadata = make_file_metadata(
-                tenant_id=TEST_TENANT_ID, item_id=item_id,
-                item_name=f"deleted_{i}.txt", mime_type="text/plain",
-                is_deleted=True,
-            )
-            connect_table.put_item(Item=metadata)
-            deleted_ids.append(item_id)
-
-        result = invoke_lambda(
-            lambda_client, BATCH_SCORING_FN, {"tenant_id": TEST_TENANT_ID}
+    def test_rt_1_06_dlq_message_retention(self, sqs_client, analyze_dlq_url):
+        """analyzeExposure DLQ のメッセージ保持期間が 14 日（1209600 秒）であること。"""
+        attrs = sqs_client.get_queue_attributes(
+            QueueUrl=analyze_dlq_url,
+            AttributeNames=["MessageRetentionPeriod"],
+        )["Attributes"]
+        retention = int(attrs.get("MessageRetentionPeriod", "0"))
+        assert retention == 1209600, (
+            f"{ANALYZE_DLQ_NAME}: retention={retention}s, expected 1209600s (14 days)"
         )
-        assert result["error"] is None, f"batchScoring failed: {result}"
-        assert result["status_code"] == 200
 
     def test_rt_1_08_lambda_throttle_recovery(self, lambda_client):
         """Lambda の予約同時実行数が設定されていることを確認。"""
-        for fn_name in [ANALYZE_EXPOSURE_FN, DETECT_SENSITIVITY_FN]:
+        for fn_name in [ANALYZE_EXPOSURE_FN]:
             try:
                 resp = lambda_client.get_function_concurrency(
                     FunctionName=fn_name
@@ -284,6 +240,7 @@ class TestRT1Resilience:
                 pytest.skip(f"Function {fn_name} not found")
 
     @pytest.mark.slow
+    @pytest.mark.skip(reason="Phase 6.5 detectSensitivity flow is retired in hard-cut mode")
     def test_rt_1_09_phase65_duplicate_messages_idempotent(
         self,
         finding_table,
@@ -312,7 +269,7 @@ class TestRT1Resilience:
                 "last_evaluated_at": now,
             }
         )
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+        raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
         body = "重複メッセージの耐性テスト: 佐藤花子 sato@example.com"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET,

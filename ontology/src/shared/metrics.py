@@ -1,4 +1,4 @@
-"""CloudWatch metrics helper."""
+"""CloudWatchメトリクス送信ユーティリティ。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,22 @@ def publish_metric(
     namespace: str = NAMESPACE,
     cloudwatch_client: BaseClient | None = None,
 ) -> dict[str, Any]:
-    """Publish a single CloudWatch metric value."""
+    """CloudWatch へ単一メトリクスを送信する。
+
+    Args:
+        metric_name: メトリクス名。
+        value: 変換対象値。
+        unit: 入力値。
+        dimensions: 入力値。
+        namespace: 入力値。
+        cloudwatch_client: 入力値。
+
+    Returns:
+        dict[str, Any]: 処理結果の辞書。
+
+    Notes:
+        必要に応じて dimensions を付与し、Namespace 単位で記録する。
+    """
     client = cloudwatch_client or boto3.client("cloudwatch")
     payload: dict[str, Any] = {
         "MetricName": metric_name,

@@ -80,7 +80,7 @@ ALB (webhook.graphsuite.jp / HTTPS)
 | メッセージング | SNS Topic | `AIReadyConnect-NotificationTopic` |
 | メッセージング | SQS Queue + DLQ | `AIReadyConnect-NotificationQueue` |
 | データベース | DynamoDB (3 テーブル) | `AIReadyConnect-FileMetadata` / `IdempotencyKeys` / `DeltaTokens` |
-| ストレージ | S3 Bucket | `aireadyconnect-raw-payload-{account_id}` |
+| ストレージ | S3 Bucket | `aireadyconnect-raw-payload` |
 | コンピュート | Lambda (4 関数) | `AIReadyConnect-*` |
 | スケジュール | EventBridge Rules (2) | `AIReadyConnect-renewTokenSchedule` / `renewSubSchedule` |
 | セキュリティ | IAM Role | `AIReadyConnect-LambdaRole` |
@@ -107,13 +107,14 @@ AI_Ready/connect/
 │   │   ├── graph_client.py      #   OAuth2 認証 + API クライアント (retry/backoff)
 │   │   ├── webhook.py           #   Webhook 解析 (validation/clientState/parse)
 │   │   ├── delta.py             #   Delta Query (ページング/deltaLink 管理)
+│   │   ├── messages.py          #   Teams/チャット メッセージ正規化
 │   │   └── normalizer.py        #   DriveItem → DynamoDB 正規化 (40+ 属性)
 │   │
-│   └── handlers/                # Lambda ハンドラー
-│       ├── receive_notification.py  #   ALB → Validation / Health / SNS Publish
-│       ├── pull_file_metadata.py    #   SQS → Delta Query → DynamoDB + S3
-│       ├── renew_access_token.py    #   EventBridge → OAuth2 トークン更新
-│       └── renew_subscription.py    #   EventBridge → サブスクリプション延長
+│   └── handlers/                # Lambda ハンドラー（CDK stack.py の定義と対応）
+│       ├── receive_notification.py / pull_file_metadata.py / pull_message_metadata.py
+│       ├── renew_access_token.py / renew_subscription.py / init_subscription.py
+│       ├── backfill_chat_messages.py / cleanup_connection_artifacts.py
+│       └── （ほか `src/shared` に connection_lookup / connection_cleanup など）
 │
 ├── infra/                       # AWS CDK (Python)
 │   ├── app.py                   #   CDK アプリエントリポイント
@@ -121,16 +122,6 @@ AI_Ready/connect/
 │   ├── cdk.json                 #   CDK 設定
 │   ├── requirements.txt         #   CDK 依存 (aws-cdk-lib)
 │   └── layers/deps/python/      #   Lambda Layer (requests, python-dotenv)
-│
-├── scripts/                     # セットアップ・運用スクリプト
-│   ├── seed_parameters.py       #   SSM Parameter Store 初期値登録
-│   ├── verify_graph_api.py      #   Graph API 疎通確認
-│   ├── init_subscription.py     #   初回 Webhook サブスクリプション作成
-│   ├── upload_test_file.py      #   E2E テスト用ファイルアップロード
-│   ├── delete_test_file.py      #   E2E テスト用ファイル削除
-│   ├── check_logs.py            #   CloudWatch ログ確認
-│   ├── check_all_logs.py        #   全 Lambda + SQS + DynamoDB 状態確認
-│   └── show_metadata.py         #   DynamoDB メタデータ表示
 │
 ├── tests/                       # pytest + moto
 │   ├── conftest.py              #   AWS モック / fixtures / 環境変数セットアップ
@@ -141,14 +132,9 @@ AI_Ready/connect/
 │   ├── test_webhook.py          #   Webhook 解析テスト (22 tests)
 │   ├── test_normalizer.py       #   正規化テスト (16 tests)
 │   └── test_delta.py            #   Delta Query + DynamoDB テスト (12 tests)
-│
-├── Docs/                        # 設計ドキュメント
-│   ├── 詳細設計.md
-│   ├── タスク一覧.md
-│   └── ディレクトリ構成.md
-│
-└── bk/                         # アーカイブ (参考資料・デバッグログ)
 ```
+
+運用タスク（SSM 登録、ログ確認、DynamoDB 確認など）は AWS コンソール、AWS CLI、または該当 Lambda の手動実行で行います。
 
 ---
 
@@ -197,11 +183,9 @@ cp .env.example .env
 
 ### 4. AWS Parameter Store 初期値登録
 
-```bash
-python scripts/seed_parameters.py
-```
+Azure AD の値を SSM に登録します（例: `aws ssm put-parameter`）。最低限、Graph 呼び出しに必要なクライアント ID / テナント ID / シークレット、`clientState`、監視対象の `drive_id` などを、運用方針に沿ったパラメータ名で登録してください。
 
-以下のパラメータが登録されます:
+以下は従来スクリプトが想定していたパラメータの例です:
 
 | パラメータ名 | 内容 |
 |-------------|------|
@@ -211,7 +195,7 @@ python scripts/seed_parameters.py
 | `MSGraphClientState` | Webhook 検証用シークレット (SecureString) |
 | `MSGraphDriveId` | 監視対象 SharePoint ドライブ ID |
 | `MSGraphAccessToken` | OAuth2 アクセストークン (自動更新) |
-| `MSGraphSubscriptionId` | サブスクリプション ID (init_subscription.py で設定) |
+| `MSGraphSubscriptionId` | サブスクリプション ID (`initSubscription` Lambda で設定) |
 
 ### 5. CDK デプロイ
 
@@ -231,15 +215,14 @@ cdk deploy
 ### 6. 初期化
 
 ```bash
-# Graph API 疎通確認
-python scripts/verify_graph_api.py
-
 # アクセストークン初期化 (Lambda 手動実行)
 aws lambda invoke --function-name AIReadyConnect-renewAccessToken --payload "{}" response.json
 
-# Webhook サブスクリプション作成
-python scripts/init_subscription.py
+# Webhook サブスクリプション作成（テナント / 接続に合わせて payload を編集）
+aws lambda invoke --function-name AIReadyConnect-initSubscription --cli-binary-format raw-in-base64-out --payload "{\"tenant_id\":\"default\",\"connection_id\":\"conn-your-id\"}" init-subscription-out.json
 ```
+
+Graph の疎通確認は、上記トークン取得後に `renewAccessToken` のログ、または Graph の監視リソースに対する API 呼び出しで行ってください。
 
 ### 7. テスト実行
 
@@ -298,8 +281,7 @@ python -m pytest tests/ --cov=src --cov-report=html
 ### S3: Raw Payload
 
 ```
-s3://aireadyconnect-raw-payload-{account_id}/
-  raw/{tenant_id}/{date}/{item_id}_{uuid}.json
+s3://aireadyconnect-raw-payload/{tenant_id}/raw/{date}/{item_id}_{uuid}.json
 ```
 
 各ファイルに Graph API レスポンスの完全な JSON (item + permissions) を保存。
@@ -369,10 +351,10 @@ DriveItem の全ファセットを網羅的に抽出:
 
 ### 監視ポイント
 
-| 対象 | 確認コマンド |
+| 対象 | 確認方法 |
 |------|------------|
-| Lambda ログ | `python scripts/check_all_logs.py` |
-| DynamoDB データ | `python scripts/show_metadata.py` |
+| Lambda ログ | CloudWatch Logs（各関数のロググループ）または `aws logs filter-log-events` |
+| DynamoDB データ | AWS コンソールの該当テーブル、または `aws dynamodb scan/query` |
 | DLQ (エラー) | AWS Console → SQS → `AIReadyConnect-NotificationDLQ` |
 
 ### スタック削除

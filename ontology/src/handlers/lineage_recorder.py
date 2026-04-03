@@ -1,9 +1,13 @@
-"""lineageRecorder Lambda handler."""
+"""lineageRecorder Lambda ハンドラ。
+
+各処理ステップの開始/完了/失敗を OpenLineage 互換イベントとして保存する。
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import boto3
 
@@ -18,11 +22,11 @@ SCHEMA_URL = (
 )
 TTL_DAYS = 90
 VALID_EVENT_TYPES = {"START", "COMPLETE", "FAIL", "ABORT"}
+TOKYO_TZ = ZoneInfo("Asia/Tokyo")
 
 JOB_DESCRIPTIONS = {
     "schemaTransform": "Connect FileMetadata to UnifiedMetadata",
     "entityResolver": "Resolve entities and register gold master",
-    "batchReconciler": "Daily reconciliation and quality rescoring",
     "governanceIntegration": "Consume governance integrated analysis results",
 }
 
@@ -30,7 +34,21 @@ _dynamodb_resource = None
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Handle synchronous lineage record request."""
+    """系譜イベント要求を検証し、OpenLineage互換データとして保存する。
+
+    Args:
+        event: 系譜記録リクエスト。`lineage_id` / `tenant_id` / `job_name` /
+            `event_type` などを含む辞書。
+        context: Lambda 実行コンテキスト（本処理では未使用）。
+
+    Returns:
+        dict[str, Any]: 成功時は `statusCode=200` と記録ID、入力不備時は
+            `statusCode=400` とエラー理由。
+
+    Notes:
+        event_type は START/COMPLETE/FAIL/ABORT のみ受け付ける。
+        保存時には TTL を付与し、FAIL の場合は失敗メトリクスを追加記録する。
+    """
     missing_field = _validate_required_fields(event)
     if missing_field:
         return {"statusCode": 400, "error": f"Missing required field: {missing_field}"}
@@ -39,7 +57,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if event_type not in VALID_EVENT_TYPES:
         return {"statusCode": 400, "error": f"Invalid event_type: {event_type}"}
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(TOKYO_TZ).isoformat()
     run_event = _build_openlineage_event(
         lineage_id=str(event["lineage_id"]),
         tenant_id=str(event["tenant_id"]),
@@ -55,7 +73,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if event_type == "ABORT":
         status = "skipped"
 
-    ttl_epoch = int(datetime.now(timezone.utc).timestamp()) + (TTL_DAYS * 86400)
+    ttl_epoch = int(datetime.now(TOKYO_TZ).timestamp()) + (TTL_DAYS * 86400)
     model = LineageEvent(
         tenant_id=str(event["tenant_id"]),
         lineage_id=str(event["lineage_id"]),
@@ -87,6 +105,17 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def _get_dynamodb_resource() -> Any:
+    """DynamoDB Resource を遅延初期化で取得する。
+
+    Args:
+        なし。
+
+    Returns:
+        Any: boto3 DynamoDB Resource。
+
+    Notes:
+        グローバルキャッシュを使い、同一コンテナでの再生成を避ける。
+    """
     global _dynamodb_resource
     if _dynamodb_resource is None:
         _dynamodb_resource = boto3.resource("dynamodb")
@@ -94,6 +123,17 @@ def _get_dynamodb_resource() -> Any:
 
 
 def _get_lineage_table() -> Any:
+    """Lineage イベント保存先テーブルを取得する。
+
+    Args:
+        なし。
+
+    Returns:
+        Any: DynamoDB Table オブジェクト。
+
+    Notes:
+        `LINEAGE_EVENT_TABLE` が未設定の場合は例外を送出し、設定不備を明示する。
+    """
     import os
 
     table_name = os.environ.get("LINEAGE_EVENT_TABLE", "")
@@ -103,6 +143,17 @@ def _get_lineage_table() -> Any:
 
 
 def _validate_required_fields(event: dict[str, Any]) -> str | None:
+    """必須フィールドの不足を検出する。
+
+    Args:
+        event: 検証対象イベント辞書。
+
+    Returns:
+        str | None: 最初に不足したフィールド名。問題なければ `None`。
+
+    Notes:
+        受信フォーマット不備を早期に弾き、下流処理での例外を減らす。
+    """
     required = ("lineage_id", "tenant_id", "job_name", "event_type")
     for field in required:
         if field not in event:
@@ -121,6 +172,25 @@ def _build_openlineage_event(
     output_dataset: str,
     metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """OpenLineage RunEvent 互換のイベントペイロードを構築する。
+
+    Args:
+        lineage_id: 実行単位の識別子（runId）。
+        tenant_id: データセット名前空間に反映するテナントID。
+        job_name: ジョブ名（ファセット説明にも利用）。
+        event_type: START/COMPLETE/FAIL/ABORT のイベント種別。
+        event_time: イベント発生時刻（ISO8601）。
+        input_dataset: 入力データセット識別子。
+        output_dataset: 出力データセット識別子。
+        metadata: 任意の追加実行情報（run facet の custom に格納）。
+
+    Returns:
+        dict[str, Any]: OpenLineage 仕様に沿ったイベント辞書。
+
+    Notes:
+        input/output が空文字の場合は datasets を空配列のまま保持する。
+        metadata が与えられた場合のみ custom facet を付与する。
+    """
     event: dict[str, Any] = {
         "eventType": event_type,
         "eventTime": event_time,
@@ -171,6 +241,18 @@ def _build_openlineage_event(
 
 
 def _safe_publish_metric(metric_name: str, value: float) -> None:
+    """CloudWatch メトリクスを安全に送信する。
+
+    Args:
+        metric_name: 送信するメトリクス名。
+        value: メトリクス値。
+
+    Returns:
+        None: 戻り値なし。
+
+    Notes:
+        メトリクス送信失敗は WARN ログへ退避し、イベント記録処理は継続する。
+    """
     try:
         publish_metric(metric_name, value)
     except Exception as exc:

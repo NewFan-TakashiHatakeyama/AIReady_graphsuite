@@ -1,18 +1,26 @@
-"""構造化ログ（JSON フォーマット）"""
+"""構造化ログユーティリティ。
+
+CloudWatch Logs で扱いやすい JSON フォーマットへ統一し、
+全ハンドラ/サービスで同一形式のログを出力できるようにする。
+"""
 
 import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+TOKYO_TZ = ZoneInfo("Asia/Tokyo")
 
 
 class JsonFormatter(logging.Formatter):
     """CloudWatch Logs 向けの JSON 構造化ログフォーマッタ"""
 
     def format(self, record: logging.LogRecord) -> str:
+        """LogRecord を JSON 文字列へ整形する。"""
         log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(TOKYO_TZ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -28,7 +36,17 @@ class JsonFormatter(logging.Formatter):
 
 
 def get_logger(name: str) -> logging.Logger:
-    """構造化ログ対応のロガーを取得する。"""
+    """構造化ログ対応のロガーを取得する。
+    
+    Args:
+        name: 引数。
+    
+    Returns:
+        戻り値。
+    
+    Notes:
+        なし。
+    """
     logger = logging.getLogger(name)
 
     if not logger.handlers:

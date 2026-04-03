@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 import boto3
 
 from src.shared.config import get_config
+from src.shared.connection_lookup import lookup_connection_id_by_subscription
 from src.shared.logger import get_logger, log_with_context
-from src.shared.ssm import get_param
+from src.shared.ssm import get_param_optional, resolve_connect_param
 from src.connectors.m365.webhook import (
     extract_resource_info,
     get_validation_token,
@@ -35,7 +35,16 @@ sns_client = boto3.client("sns", region_name=get_config().region)
 
 
 def _response(status_code: int, body: str, content_type: str = "text/plain") -> dict:
-    """ALB Lambda レスポンスを生成する"""
+    """ALB 互換レスポンスを生成する。
+
+    Args:
+        status_code: HTTP ステータスコード
+        body: レスポンス本文
+        content_type: Content-Type ヘッダー値
+
+    Returns:
+        ALB Lambda 互換のレスポンス辞書
+    """
     return {
         "statusCode": status_code,
         "statusDescription": f"{status_code} OK",
@@ -46,10 +55,28 @@ def _response(status_code: int, body: str, content_type: str = "text/plain") -> 
 
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """ALB から呼び出される Webhook 受信ハンドラー"""
+    """ALB から呼び出される Webhook 受信ハンドラー。
+
+    処理フロー:
+    1. ヘルスチェック/バリデーションリクエストの早期応答
+    2. 通知本体を解析し clientState を検証
+    3. 正当な通知のみ SNS に中継して 202 を返却
+
+    Args:
+        event: ALB 経由で渡される Lambda イベント
+        context: Lambda コンテキスト
+
+    Returns:
+        Webhook 処理結果を表すレスポンス辞書
+    """
     cfg = get_config()
+    tenant_id = str(event.get("tenant_id") or cfg.tenant_id).strip() or cfg.tenant_id
+    active_connection_id = get_param_optional(
+        f"/aiready/connect/{tenant_id}/active_connection_id",
+        decrypt=False,
+    )
     request_id = getattr(context, "aws_request_id", "local")
-    logger = get_logger(__name__, tenant_id=cfg.tenant_id, request_id=request_id)
+    logger = get_logger(__name__, tenant_id=tenant_id, request_id=request_id)
 
     method = event.get("httpMethod", "").upper()
     path = event.get("path", "/")
@@ -67,6 +94,11 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "headers": event.get("headers", {}),
         },
     )
+
+    # 一部の検証フロー・プロキシが OPTIONS を送る。405 を避け 200 を返す。
+    if method == "OPTIONS":
+        log_with_context(logger, logging.INFO, "OPTIONS preflight — 200 OK")
+        return _response(200, "")
 
     # ── 1. ヘルスチェック ──
     if is_health_check(event):
@@ -93,14 +125,25 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         log_with_context(logger, logging.WARNING, "Empty notification body")
         return _response(400, "Bad Request")
 
-    # clientState を SSM から取得
-    expected_client_state = get_param(cfg.ssm_client_state)
-
     published_count = 0
     rejected_count = 0
 
     for notification in notifications:
         resource_info = extract_resource_info(notification)
+        sub_id = str(resource_info.get("subscription_id") or "").strip()
+        resolved_connection_id = lookup_connection_id_by_subscription(
+            tenant_id=tenant_id,
+            subscription_id=sub_id,
+        )
+        connection_id_for_notification = resolved_connection_id or active_connection_id
+
+        expected_client_state = resolve_connect_param(
+            "client_state",
+            tenant_id=tenant_id,
+            connection_id=connection_id_for_notification,
+            decrypt=True,
+            fallback_name=cfg.ssm_client_state,
+        )
 
         # clientState 検証
         if not verify_client_state(notification, expected_client_state):
@@ -118,24 +161,50 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "subscription_id": resource_info["subscription_id"],
             "change_type": resource_info["change_type"],
             "resource": resource_info["resource"],
+            "resource_type": resource_info.get("resource_type", "drive"),
             "drive_id": resource_info["drive_id"],
             "item_id": resource_info["item_id"],
-            "tenant_id": cfg.tenant_id,
+            "team_id": resource_info.get("team_id", ""),
+            "channel_id": resource_info.get("channel_id", ""),
+            "chat_id": resource_info.get("chat_id", ""),
+            "message_id": resource_info.get("message_id", ""),
+            "tenant_id": tenant_id,
+            "connection_id": connection_id_for_notification,
         })
+
+        drive_id_attr = str(resource_info.get("drive_id") or "").strip() or "-"
+        attributes = {
+            "changeType": {
+                "DataType": "String",
+                "StringValue": resource_info["change_type"],
+            },
+            "resourceType": {
+                "DataType": "String",
+                "StringValue": str(resource_info.get("resource_type") or "unknown"),
+            },
+            "driveId": {
+                "DataType": "String",
+                "StringValue": drive_id_attr,
+            },
+            "tenant_id": {
+                "DataType": "String",
+                "StringValue": tenant_id,
+            },
+            "correlation_id": {
+                "DataType": "String",
+                "StringValue": request_id,
+            },
+        }
+        if connection_id_for_notification:
+            attributes["connection_id"] = {
+                "DataType": "String",
+                "StringValue": connection_id_for_notification,
+            }
 
         sns_client.publish(
             TopicArn=cfg.notification_topic_arn,
             Message=message,
-            MessageAttributes={
-                "changeType": {
-                    "DataType": "String",
-                    "StringValue": resource_info["change_type"],
-                },
-                "driveId": {
-                    "DataType": "String",
-                    "StringValue": resource_info["drive_id"],
-                },
-            },
+            MessageAttributes=attributes,
         )
 
         published_count += 1
@@ -143,7 +212,12 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             logger, logging.INFO,
             f"Published to SNS: {resource_info['change_type']} on {resource_info['resource']}",
             event_id=resource_info["subscription_id"],
-            extra_data=resource_info,
+            extra_data={
+                **resource_info,
+                "tenant_id": tenant_id,
+                "connection_id": connection_id_for_notification,
+                "correlation_id": request_id,
+            },
         )
 
     if rejected_count > 0 and published_count == 0:

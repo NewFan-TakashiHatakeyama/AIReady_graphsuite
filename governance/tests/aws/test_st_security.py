@@ -10,19 +10,17 @@ import time
 import uuid
 
 import pytest
+from botocore.exceptions import ClientError
 
 from tests.aws.conftest import (
+    ANALYZE_DLQ_NAME,
     ANALYZE_EXPOSURE_FN,
     AWS_REGION,
-    BATCH_SCORING_FN,
     DOCUMENT_ANALYSIS_TABLE_NAME,
     FINDING_TABLE_NAME,
     RAW_PAYLOAD_BUCKET,
-    REPORT_BUCKET,
-    SENSITIVITY_QUEUE_NAME,
     TEST_TENANT_ID,
     VECTORS_BUCKET,
-    invoke_lambda,
     make_file_metadata,
     wait_for_finding_by_item,
 )
@@ -114,8 +112,8 @@ class TestST1Security:
                 )
 
     def test_st_1_04_s3_encryption(self, s3_client):
-        """レポートバケットに AES256 暗号化が設定されている。"""
-        encryption = s3_client.get_bucket_encryption(Bucket=REPORT_BUCKET)
+        """Connect raw-payload バケットにサーバーサイド暗号化が設定されている。"""
+        encryption = s3_client.get_bucket_encryption(Bucket=RAW_PAYLOAD_BUCKET)
         rules = encryption["ServerSideEncryptionConfiguration"]["Rules"]
         assert len(rules) > 0
         algo = rules[0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"]
@@ -136,7 +134,7 @@ class TestST1Security:
     ):
         """PII 検出後、CloudWatch ログに生の PII 値 "1234 5678 9012" が含まれない。"""
         item_id = f"item-st106-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+        raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
         pii_value = "1234 5678 9012"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
@@ -179,7 +177,7 @@ class TestST1Security:
     ):
         """PII 検出後の Finding にはタイプ名のみ記録され、生の値は含まれない。"""
         item_id = f"item-st107-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+        raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
         pii_value = "1234 5678 9012"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
@@ -209,43 +207,9 @@ class TestST1Security:
                 entry_str = json.dumps(entry, default=str)
                 assert pii_value not in entry_str
 
-    def test_st_1_08_pii_not_in_report(
-        self, connect_table, finding_table, lambda_client, s3_client
-    ):
-        """batchScoring レポートに生の PII 値が含まれない。"""
-        item_id = f"item-st108-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
-        pii_value = "9876 5432 1098"
-        s3_client.put_object(
-            Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
-            Body=f"個人番号 {pii_value}".encode("utf-8"),
-        )
-        metadata = make_file_metadata(
-            tenant_id=TEST_TENANT_ID, item_id=item_id,
-            item_name="pii_report_test.txt", mime_type="text/plain",
-            raw_s3_key=raw_key,
-        )
-        connect_table.put_item(Item=metadata)
-
-        result = invoke_lambda(
-            lambda_client, BATCH_SCORING_FN, {"tenant_id": TEST_TENANT_ID}
-        )
-        assert result["error"] is None
-
-        report_objects = s3_client.list_objects_v2(
-            Bucket=REPORT_BUCKET, Prefix=f"{TEST_TENANT_ID}/"
-        )
-        for obj in report_objects.get("Contents", []):
-            body = s3_client.get_object(
-                Bucket=REPORT_BUCKET, Key=obj["Key"]
-            )["Body"].read().decode("utf-8")
-            assert pii_value not in body, (
-                f"Raw PII value found in report {obj['Key']}"
-            )
-
     def test_st_1_09_s3_public_access_blocked(self, s3_client):
-        """レポートバケットのパブリックアクセスが全てブロックされている。"""
-        resp = s3_client.get_public_access_block(Bucket=REPORT_BUCKET)
+        """Connect raw-payload バケットのパブリックアクセスが全てブロックされている。"""
+        resp = s3_client.get_public_access_block(Bucket=RAW_PAYLOAD_BUCKET)
         config = resp["PublicAccessBlockConfiguration"]
         assert config["BlockPublicAcls"] is True
         assert config["IgnorePublicAcls"] is True
@@ -254,7 +218,7 @@ class TestST1Security:
 
     def test_st_1_10_sqs_no_public_policy(self, sqs_client):
         """Sensitivity Detection キューに '*' プリンシパルのポリシーが無い。"""
-        queue_url = sqs_client.get_queue_url(QueueName=SENSITIVITY_QUEUE_NAME)["QueueUrl"]
+        queue_url = sqs_client.get_queue_url(QueueName=ANALYZE_DLQ_NAME)["QueueUrl"]
         attrs = sqs_client.get_queue_attributes(
             QueueUrl=queue_url, AttributeNames=["Policy"]
         ).get("Attributes", {})
@@ -290,44 +254,8 @@ class TestST1Security:
         assert config["RestrictPublicBuckets"] is True
 
     def test_st_1_13_detect_sensitivity_bedrock_scope(self, lambda_client, iam_client):
-        """detectSensitivity 実行ロールが Bedrock invoke 権限を持つ。"""
-        fn = lambda_client.get_function(FunctionName="AIReadyGov-detectSensitivity")
-        role_arn = fn["Configuration"]["Role"]
-        role_name = role_arn.split("/")[-1]
-
-        has_bedrock_invoke = False
-
-        inline_policies = iam_client.list_role_policies(RoleName=role_name)
-        for policy_name in inline_policies.get("PolicyNames", []):
-            doc = iam_client.get_role_policy(
-                RoleName=role_name, PolicyName=policy_name
-            )["PolicyDocument"]
-            for statement in doc.get("Statement", []):
-                actions = statement.get("Action", [])
-                if isinstance(actions, str):
-                    actions = [actions]
-                if any(a in ("bedrock:InvokeModel", "bedrock:*") for a in actions):
-                    has_bedrock_invoke = True
-                    break
-            if has_bedrock_invoke:
-                break
-
-        if not has_bedrock_invoke:
-            attached = iam_client.list_attached_role_policies(RoleName=role_name)
-            for policy in attached.get("AttachedPolicies", []):
-                arn = policy["PolicyArn"]
-                version = iam_client.get_policy(PolicyArn=arn)["Policy"]["DefaultVersionId"]
-                doc = iam_client.get_policy_version(
-                    PolicyArn=arn, VersionId=version
-                )["PolicyVersion"]["Document"]
-                for statement in doc.get("Statement", []):
-                    actions = statement.get("Action", [])
-                    if isinstance(actions, str):
-                        actions = [actions]
-                    if any(a in ("bedrock:InvokeModel", "bedrock:*") for a in actions):
-                        has_bedrock_invoke = True
-                        break
-                if has_bedrock_invoke:
-                    break
-
-        assert has_bedrock_invoke, "detectSensitivity role missing Bedrock invoke permission"
+        """hard-cut 後は detectSensitivity 関数が存在しない。"""
+        del iam_client
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName="AIReadyGov-detectSensitivity")
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"

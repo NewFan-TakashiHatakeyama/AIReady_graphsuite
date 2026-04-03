@@ -1,0 +1,47 @@
+services:
+  webui:
+    build: .
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+      - VITE_API_PROXY=true
+      # Proxy all relevant API paths to the backend
+      - VITE_API_ENDPOINTS=/login,/auth-status,/health,/documents,/query,/graphs,/graph,/docs,/openapi.json
+      - VITE_BACKEND_URL=http://lightrag-api:8000
+    depends_on:
+      - lightrag-api
+    networks:
+      - lightrag-network
+
+  lightrag-api:
+    build:
+      context: ../api
+      dockerfile: Dockerfile
+    container_name: lightrag-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # 開発時のホットリロード用
+      - ../api:/app
+      - /app/__pycache__
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - lightrag-network
+
+networks:
+  lightrag-network:
+    name: lightrag-network
+

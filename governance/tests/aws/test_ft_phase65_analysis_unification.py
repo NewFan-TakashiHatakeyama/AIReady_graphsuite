@@ -21,7 +21,10 @@ from tests.aws.conftest import (
     wait_for_finding_scan_completed,
 )
 
-pytestmark = pytest.mark.aws
+pytestmark = [
+    pytest.mark.aws,
+    pytest.mark.skip(reason="Phase 6.5 detectSensitivity extensions are retired in hard-cut mode"),
+]
 
 
 def _finding_id(tenant_id: str, source: str, item_id: str) -> str:
@@ -87,7 +90,7 @@ def _run_scan(
 ) -> tuple[str, str, str]:
     item_id = f"item-p65-{uuid.uuid4().hex[:10]}"
     finding_id = _seed_finding(finding_table, tenant_id, item_id)
-    raw_s3_key = f"raw/{tenant_id}/{item_id}/payload.txt"
+    raw_s3_key = f"{tenant_id}/raw/{item_id}/payload.txt"
     s3_client.put_object(
         Bucket=RAW_PAYLOAD_BUCKET,
         Key=raw_s3_key,
@@ -210,7 +213,7 @@ class TestPhase65Functional:
         analysis = wait_for_document_analysis(document_analysis_table, tenant_id, item_id)
         assert analysis is not None
         vector_key = analysis.get("embedding_s3_key", "")
-        assert vector_key.startswith(f"vectors/{tenant_id}/{item_id}")
+        assert vector_key.startswith(f"{tenant_id}/vectors/{item_id}")
         s3_client.head_object(Bucket=VECTORS_BUCKET, Key=vector_key)
 
     def test_ft_9_01_pii_and_secrets_summary_consistency(

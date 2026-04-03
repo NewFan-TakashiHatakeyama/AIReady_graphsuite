@@ -1,0 +1,817 @@
+{
+  "login": "ログイン",
+  "settings": {
+    "language": "言語",
+    "theme": "テーマ",
+    "light": "ライト",
+    "dark": "ダーク",
+    "system": "システム",
+    "llmSettings": "LLM設定"
+  },
+  "header": {
+    "home": "GraphSuite ホーム",
+    "diagnosis": "診断",
+    "cleaning": "清掃",
+    "operations": "運用",
+    "sub": {
+      "connect": "接続",
+      "governance": "ガバナンス",
+      "dashboard": "ダッシュボード",
+      "auditLog": "監査ログ"
+    },
+    "knowledgeGraph": "グラフ探索",
+    "retrieval": "検索",
+    "aiAgent": "AIエージェント",
+    "dashboard": "ダッシュボード",
+    "dataManagement": "データ管理",
+    "data-upload": "データ連携",
+    "directory-structure": "ディレクトリ構成",
+    "monitoring": "監視",
+    "projectRepository": "プロジェクトリポジトリ",
+    "logout": "ログアウト",
+    "themeToggle": {
+      "switchToLight": "ライトテーマに切り替え",
+      "switchToDark": "ダークテーマに切り替え"
+    }
+  },
+  "login_page": {
+    "description": "アカウントとパスワードを入力してシステムにログインしてください",
+    "username": "ユーザー名",
+    "usernamePlaceholder": "ユーザー名を入力してください",
+    "password": "パスワード",
+    "passwordPlaceholder": "パスワードを入力してください",
+    "loginButton": "ログイン",
+    "loggingIn": "ログイン中...",
+    "successMessage": "ログインに成功しました",
+    "errorEmptyFields": "ユーザー名とパスワードを入力してください",
+    "errorInvalidCredentials": "ログインに失敗しました。ユーザー名とパスワードを確認してください",
+    "authDisabled": "認証が無効です。ログイン不要モードを使用します。",
+    "guestMode": "ログイン不要"
+  },
+  "common": {
+    "cancel": "キャンセル",
+    "save": "保存",
+    "saving": "保存中...",
+    "saveFailed": "保存に失敗しました"
+  },
+  "documentPanel": {
+    "clearDocuments": {
+      "button": "全件クリア",
+      "tooltip": "登録済みドキュメントを全件削除",
+      "title": "ドキュメントを全件削除",
+      "description": "登録済みドキュメントをすべて削除します。",
+      "warning": "この操作は取り消せません。全ドキュメントが恒久的に削除されます。",
+      "confirm": "本当にすべてのドキュメントをクリアしますか？",
+      "confirmPrompt": "この操作を確定するには 'yes' と入力してください",
+      "confirmPlaceholder": "'yes'と入力して確定",
+      "clearCache": "LLMキャッシュをクリア",
+      "confirmButton": "はい",
+      "clearing": "クリア中...",
+      "timeout": "クリア操作がタイムアウトしました。もう一度お試しください",
+      "success": "ドキュメントが正常にクリアされました",
+      "cacheCleared": "キャッシュが正常にクリアされました",
+      "cacheClearFailed": "キャッシュのクリアに失敗しました:\n{{error}}",
+      "failed": "ドキュメントのクリアに失敗しました:\n{{message}}",
+      "error": "ドキュメントのクリアに失敗しました:\n{{error}}"
+    },
+    "deleteDocuments": {
+      "button": "削除",
+      "tooltip": "選択したドキュメントを削除",
+      "title": "ドキュメントの削除",
+      "description": "選択したドキュメントを恒久的に削除します。",
+      "warning": "この操作は取り消せません。対象ドキュメントが恒久的に削除されます。",
+      "confirm": "選択した{{count}}件のドキュメントを本当に削除しますか？",
+      "confirmPrompt": "この操作を確定するには 'yes' と入力してください",
+      "confirmPlaceholder": "'yes'と入力して確定",
+      "confirmButton": "はい",
+      "deleting": "削除中...",
+      "deleteFileOption": "アップロードされたファイルも削除",
+      "deleteFileTooltip": "このオプションをチェックすると、サーバー上の対応するアップロードされたファイルも削除されます",
+      "success": "ドキュメント削除パイプラインが正常に開始されました",
+      "failed": "ドキュメントの削除に失敗しました:\n{{message}}",
+      "error": "ドキュメントの削除に失敗しました:\n{{error}}",
+      "busy": "パイプラインがビジー状態です。後でもう一度お試しください",
+      "notAllowed": "この操作を実行する権限がありません"
+    },
+    "selectDocuments": {
+      "selectCurrentPage": "現在のページを選択 ({{count}})",
+      "deselectAll": "すべての選択を解除 ({{count}})"
+    },
+    "uploadDocuments": {
+      "button": "アップロード",
+      "tooltip": "ドキュメントをアップロード",
+      "title": "ドキュメントのアップロード",
+      "description": "ファイルをドラッグ&ドロップするか、クリックして選択してください。",
+      "single": {
+        "uploading": "{{name}}をアップロード中: {{percent}}%",
+        "success": "アップロード成功:\n{{name}}は正常にアップロードされました",
+        "failed": "アップロード失敗:\n{{name}}\n{{message}}",
+        "error": "アップロード失敗:\n{{name}}\n{{error}}"
+      },
+      "batch": {
+        "uploading": "ファイルをアップロード中...",
+        "success": "ファイルが正常にアップロードされました",
+        "error": "一部のファイルのアップロードに失敗しました"
+      },
+      "generalError": "アップロード失敗\n{{error}}",
+      "fileTypes": "対応形式: TXT, MD, DOCX, PDF, PPTX, XLSX, RTF, ODT, EPUB, HTML, HTM, TEX, JSON, XML, YAML, YML, CSV, LOG, CONF, INI, PROPERTIES, SQL, BAT, SH, C, CPP, PY, JAVA, JS, TS, SWIFT, GO, RB, PHP, CSS, SCSS, LESS",
+      "fileUploader": {
+        "singleFileLimit": "一度に1ファイルしかアップロードできません",
+        "maxFilesLimit": "{{count}}ファイル以上はアップロードできません",
+        "fileRejected": "ファイル{{name}}は拒否されました",
+        "unsupportedType": "対応していないファイル形式です",
+        "fileTooLarge": "ファイルが大きすぎます。最大サイズは{{maxSize}}です",
+        "dropHere": "ここにファイルをドロップしてください",
+        "dragAndDrop": "ここにファイルをドラッグ＆ドロップするか、クリックしてファイルを選択してください",
+        "removeFile": "ファイルを削除",
+        "uploadDescription": "{{isMultiple ? '複数' : count}}個のファイルをアップロードできます（各{{maxSize}}まで）",
+        "duplicateFile": "同じファイル名がサーバーキャッシュに既に存在します"
+      }
+    },
+    "documentManager": {
+      "title": "ドキュメント管理",
+      "scanButton": "スキャン",
+      "scanTooltip": "入力フォルダの新規・更新ドキュメントを検出",
+      "refreshTooltip": "一覧を最新化",
+      "pipelineStatusButton": "パイプラインステータス",
+      "pipelineStatusTooltip": "処理パイプラインの状態を確認",
+      "uploadedTitle": "登録ドキュメント一覧",
+      "uploadedDescription": "登録ドキュメントと処理状態を確認します。",
+      "emptyTitle": "ドキュメントがありません",
+      "emptyDescription": "まだアップロードされたドキュメントはありません。",
+      "columns": {
+        "id": "ID",
+        "fileName": "ファイル名",
+        "summary": "概要",
+        "status": "ステータス",
+        "length": "長さ",
+        "chunks": "チャンク",
+        "created": "作成日時",
+        "updated": "更新日時",
+        "metadata": "メタデータ",
+        "select": "選択"
+      },
+      "status": {
+        "all": "すべて",
+        "completed": "完了",
+        "processing": "処理中",
+        "pending": "保留中",
+        "failed": "失敗"
+      },
+      "errors": {
+        "loadFailed": "ドキュメントの読み込みに失敗しました\n{{error}}",
+        "scanFailed": "ドキュメントのスキャンに失敗しました\n{{error}}",
+        "scanProgressFailed": "スキャンの進捗取得に失敗しました\n{{error}}"
+      },
+      "fileNameLabel": "ファイル名",
+      "showButton": "表示",
+      "hideButton": "非表示",
+      "showFileNameTooltip": "ファイル名を表示",
+      "hideFileNameTooltip": "ファイル名を非表示"
+    },
+    "pipelineStatus": {
+      "title": "パイプラインステータス",
+      "busy": "処理中",
+      "requestPending": "処理待ちあり",
+      "jobName": "ジョブ名",
+      "startTime": "開始時刻",
+      "progress": "進捗",
+      "unit": "バッチ",
+      "latestMessage": "最新メッセージ",
+      "historyMessages": "履歴メッセージ",
+      "noActiveJob": "実行中のジョブはありません",
+      "errors": {
+        "fetchFailed": "パイプラインステータスの取得に失敗しました\n{{error}}"
+      }
+    }
+  },
+  "graphPanel": {
+    "dataIsTruncated": "表示負荷を抑えるため、最大ノード数で表示を制限しました",
+    "loading": "グラフデータを読み込み中...",
+    "statusDialog": {
+      "title": "LightRAGサーバー設定",
+      "description": "現在のシステム状態と接続情報を確認します。"
+    },
+    "legend": "凡例",
+    "nodeTypes": {
+      "person": "人物",
+      "category": "カテゴリ",
+      "geo": "地理",
+      "location": "場所",
+      "organization": "組織",
+      "event": "イベント",
+      "equipment": "機器",
+      "weapon": "武器",
+      "animal": "動物",
+      "unknown": "不明",
+      "object": "オブジェクト",
+      "group": "グループ",
+      "technology": "技術",
+      "product": "製品",
+      "document": "ドキュメント",
+      "content": "コンテンツ",
+      "data": "データ",
+      "artifact": "成果物",
+      "concept": "概念",
+      "naturalobject": "自然物",
+      "method": "方法",
+      "other": "その他"
+    },
+    "sideBar": {
+      "settings": {
+        "settings": "設定",
+        "healthCheck": "ヘルスチェック",
+        "showPropertyPanel": "プロパティパネルを表示",
+        "showSearchBar": "検索バーを表示",
+        "showNodeLabel": "ノードラベルを表示",
+        "nodeDraggable": "ノードのドラッグ可能",
+        "showEdgeLabel": "エッジラベルを表示",
+        "hideUnselectedEdges": "未選択のエッジを非表示",
+        "edgeEvents": "エッジイベント",
+        "maxQueryDepth": "最大クエリ深度",
+        "maxNodes": "最大ノード数",
+        "maxLayoutIterations": "最大レイアウト反復回数",
+        "resetToDefault": "デフォルトにリセット",
+        "edgeSizeRange": "エッジサイズ範囲",
+        "depth": "深さ",
+        "max": "最大",
+        "degree": "次数",
+        "apiKey": "APIキー",
+        "enterYourAPIkey": "APIキーを入力してください",
+        "save": "保存",
+        "refreshLayout": "レイアウトを更新"
+      },
+      "zoomControl": {
+        "zoomIn": "ズームイン",
+        "zoomOut": "ズームアウト",
+        "resetZoom": "ズームをリセット",
+        "rotateCamera": "時計回りに回転",
+        "rotateCameraCounterClockwise": "反時計回りに回転"
+      },
+      "layoutsControl": {
+        "startAnimation": "レイアウトアニメーションを続行",
+        "stopAnimation": "レイアウトアニメーションを停止",
+        "layoutGraph": "グラフをレイアウト",
+        "layouts": {
+          "Circular": "円形",
+          "Circlepack": "サークルパック",
+          "Random": "ランダム",
+          "Noverlaps": "重複なし",
+          "Force Directed": "力指向",
+          "Force Atlas": "フォースアトラス"
+        }
+      },
+      "fullScreenControl": {
+        "fullScreen": "フルスクリーン",
+        "windowed": "ウィンドウモード"
+      },
+      "legendControl": {
+        "toggleLegend": "凡例の切り替え"
+      }
+    },
+    "statusIndicator": {
+      "connected": "接続済み",
+      "disconnected": "切断されました"
+    },
+    "statusCard": {
+      "unavailable": "ステータス情報が利用できません",
+      "serverInfo": "サーバー情報",
+      "workingDirectory": "作業ディレクトリ",
+      "inputDirectory": "入力ディレクトリ",
+      "maxParallelInsert": "同時ドキュメント処理数",
+      "summarySettings": "要約設定",
+      "llmConfig": "LLM設定",
+      "llmBinding": "LLMバインディング",
+      "llmBindingHost": "LLMエンドポイント",
+      "llmModel": "LLMモデル",
+      "embeddingConfig": "埋め込み設定",
+      "embeddingBinding": "埋め込みバインディング",
+      "embeddingBindingHost": "埋め込みエンドポイント",
+      "embeddingModel": "埋め込みモデル",
+      "storageConfig": "ストレージ設定",
+      "kvStorage": "KVストレージ",
+      "docStatusStorage": "ドキュメントステータスストレージ",
+      "graphStorage": "グラフストレージ",
+      "vectorStorage": "ベクトルストレージ",
+      "workspace": "ワークスペース",
+      "maxGraphNodes": "最大グラフノード数",
+      "rerankerConfig": "リランカー設定",
+      "rerankerBindingHost": "リランカーエンドポイント",
+      "rerankerModel": "リランカーモデル",
+      "lockStatus": "ロックステータス",
+      "threshold": "しきい値"
+    },
+    "propertiesView": {
+      "editProperty": "{{property}}を編集",
+      "editPropertyDescription": "下のテキストエリアでプロパティ値を編集します。",
+      "errors": {
+        "duplicateName": "ノード名は既に存在します",
+        "updateFailed": "ノードの更新に失敗しました",
+        "tryAgainLater": "後でもう一度お試しください"
+      },
+      "success": {
+        "entityUpdated": "ノードが正常に更新されました",
+        "relationUpdated": "リレーションが正常に更新されました"
+      },
+      "node": {
+        "title": "ノード",
+        "id": "ID",
+        "labels": "ラベル",
+        "degree": "次数",
+        "properties": "プロパティ",
+        "relationships": "リレーション(サブグラフ内)",
+        "expandNode": "ノードを展開",
+        "pruneNode": "ノードを剪定",
+        "deleteAllNodesError": "グラフ内のすべてのノードの削除を拒否",
+        "nodesRemoved": "孤立ノードを含む{{count}}個のノードが削除されました",
+        "noNewNodes": "展開可能なノードが見つかりません",
+        "propertyNames": {
+          "description": "説明",
+          "entity_id": "名前",
+          "entity_type": "タイプ",
+          "source_id": "ソースID",
+          "Neighbour": "隣接",
+          "file_path": "ソース",
+          "keywords": "キー",
+          "weight": "重み"
+        }
+      },
+      "edge": {
+        "title": "リレーションシップ",
+        "id": "ID",
+        "type": "タイプ",
+        "source": "ソース",
+        "target": "ターゲット",
+        "properties": "プロパティ"
+      }
+    },
+    "search": {
+      "placeholder": "ノード名で検索...",
+      "message": "他{count}件"
+    },
+    "graphLabels": {
+      "selectTooltip": "クエリラベルを選択",
+      "noLabels": "ラベルが見つかりません",
+      "label": "ラベル",
+      "placeholder": "ラベルを検索...",
+      "andOthers": "他{count}件",
+      "refreshTooltip": "データを再読み込み（ファイル追加後）"
+    },
+    "emptyGraph": "表示対象のグラフがありません（再読み込みをお試しください）"
+  },
+  "retrievePanel": {
+    "chatMessage": {
+      "copyTooltip": "クリップボードにコピー",
+      "copyError": "テキストのクリップボードへのコピーに失敗しました",
+      "thinking": "考え中...",
+      "thinkingTime": "思考時間 {{time}}秒",
+      "thinkingInProgress": "思考中..."
+    },
+    "retrieval": {
+      "startPrompt": "クエリを入力して検索を開始してください",
+      "clear": "クリア",
+      "send": "送信",
+      "placeholder": "クエリを入力 (プレフィックス対応: /<クエリモード>)",
+      "error": "エラー: 応答の取得に失敗しました",
+      "queryModeError": "次のクエリモードのみ対応しています: {{modes}}",
+      "queryModePrefixInvalid": "無効なクエリモードプレフィックスです。使用法: /<モード> [スペース] クエリ"
+    },
+    "querySettings": {
+      "parametersTitle": "パラメータ",
+      "parametersDescription": "クエリパラメータを設定します",
+      "queryMode": "クエリモード",
+      "queryModeTooltip": "検索戦略を選択:\n• キーワード一致: 高度な技術を使用しない基本検索\n• ローカル: コンテキスト依存の情報検索\n• グローバル: グローバルなナレッジベースを利用\n• ハイブリッド: ローカルとグローバルの検索を組み合わせる\n• ミックス: ナレッジグラフとベクトル検索を統合\n• RAG不使用: 検索を行わず直接LLMにクエリを渡す",
+      "queryModeOptions": {
+        "naive": "キーワード一致",
+        "local": "ローカル",
+        "global": "グローバル",
+        "hybrid": "ハイブリッド",
+        "mix": "ミックス",
+        "bypass": "RAG不使用"
+      },
+      "responseFormat": "応答形式",
+      "responseFormatTooltip": "応答の形式を定義します。例:\n• 複数段落\n• 単一段落\n• 箇条書き",
+      "responseFormatOptions": {
+        "multipleParagraphs": "複数段落",
+        "singleParagraph": "単一段落",
+        "bulletPoints": "箇条書き"
+      },
+      "topK": "KG Top K",
+      "topKTooltip": "検索するエンティティとリレーションの数。ナイーブモード以外で適用可能。",
+      "topKPlaceholder": "top_kの値を入力",
+      "chunkTopK": "チャンク Top K",
+      "chunkTopKTooltip": "検索するテキストチャンクの数。すべてのモードで適用可能。",
+      "chunkTopKPlaceholder": "chunk_top_kの値を入力",
+      "maxEntityTokens": "最大エンティティトークン数",
+      "maxEntityTokensTooltip": "統一トークン制御システムでエンティティコンテキストに割り当てられる最大トークン数",
+      "maxRelationTokens": "最大リレーショントークン数",
+      "maxRelationTokensTooltip": "統一トークン制御システムでリレーションシップコンテキストに割り当てられる最大トークン数",
+      "maxTotalTokens": "最大合計トークン数",
+      "maxTotalTokensTooltip": "クエリコンテキスト全体（エンティティ+リレーション+チャンク+システムプロンプト）の最大合計トークン予算",
+      "historyTurns": "履歴ターン数",
+      "historyTurnsTooltip": "応答コンテキストで考慮する完全な会話ターン（ユーザーとアシスタントのペア）の数",
+      "historyTurnsPlaceholder": "履歴ターン数を入力",
+      "onlyNeedContext": "コンテキストのみ必要",
+      "onlyNeedContextTooltip": "Trueの場合、応答を生成せずに検索されたコンテキストのみを返します",
+      "onlyNeedPrompt": "プロンプトのみ必要",
+      "onlyNeedPromptTooltip": "Trueの場合、応答を生成せずに生成されたプロンプトのみを返します",
+      "streamResponse": "ストリーム応答",
+      "streamResponseTooltip": "Trueの場合、リアルタイム応答のためのストリーミング出力を有効にします",
+      "userPrompt": "ユーザープロンプト",
+      "userPromptTooltip": "LLMに追加の応答要件を提供します（クエリ内容とは無関係、出力処理のみ）。",
+      "userPromptPlaceholder": "カスタムプロンプトを入力 (任意)",
+      "enableRerank": "リランクを有効化",
+      "enableRerankTooltip": "検索されたテキストチャンクのリランキングを有効にします。Trueでリランクモデルが設定されていない場合、警告が表示されます。デフォルトはTrueです。"
+    }
+  },
+  "apiSite": {
+    "loading": "APIドキュメントを読み込み中..."
+  },
+  "apiKeyAlert": {
+    "title": "APIキーが必要です",
+    "description": "サービスにアクセスするにはAPIキーを入力してください",
+    "placeholder": "APIキーを入力してください",
+    "save": "保存"
+  },
+  "pagination": {
+    "showing": "{{total}}件中 {{start}} から {{end}} まで表示",
+    "page": "ページ",
+    "pageSize": "ページサイズ",
+    "firstPage": "最初のページ",
+    "prevPage": "前のページ",
+    "nextPage": "次のページ",
+    "lastPage": "最後のページ"
+  },
+  "appSettings": {
+    "title": "アプリ設定",
+    "apiKey": "APIキー",
+    "description": "APIキーを入力して、GraphSuiteの全機能にアクセスしてください。"
+  },
+  "landing": {
+    "header": {
+      "features": "機能",
+      "login": "ログイン"
+    },
+    "hero": {
+      "title": "社内の“今”を同期し、AIエージェントが“次”を片付ける。",
+      "description": "GraphSuiteは、会社にある資料やデータをAIが整理して、必要な情報をすぐに見つけられるようにします。まるで優秀なアシスタントが、いつでもあなたをサポートしてくれるように。",
+      "cta_document": "資料を見る",
+      "cta_demo": "実際に試してみる"
+    },
+    "features": {
+      "title": "簡単な操作で、AIがナレッジベースを作成し業務を代行します",
+      "description": "ドキュメントアップロードやファイルサーバー連携で社内情報を取り込み、AIが自動でナレッジグラフ化。その後、AIエージェントが定常業務を自動代行し、「○○の件、どうなってたっけ？」と質問するだけで、関連する資料を瞬時に見つけて教えてくれます。",
+      "tag": "機能",
+      "feature1": {
+        "title": "資料を自動で整理してくれます",
+        "description": "PDF、Word、社内のWiki、音声・動画ファイル、クラウドストレージなど、どんな形式の資料でもAIが読んで整理。関連する情報同士を繋げて、探しやすくしてくれます。",
+        "detail1": "どんな形式の資料でもOK（文書・音声・動画・クラウド）",
+        "detail2": "関連する情報を自動で見つけます",
+        "detail3": "新しい資料も随時追加できます"
+      },
+      "feature2": {
+        "title": "ファイル構造を自動で最適化",
+        "description": "散らばったファイルを分析し、機密情報を除外しながら、ナレッジとして活用すべき情報を自動で仕分け。最適なディレクトリ構成を提案します。",
+        "detail1": "機密情報の自動検出と除外",
+        "detail2": "最適なディレクトリ構成の提案",
+        "detail3": "RDBによるファイル状態管理"
+      },
+      "feature3": {
+        "title": "段階的な構造化アプローチ",
+        "description": "実行すべき業務から逆算して必要なドキュメント、情報を整理します。最適なディレクトリ構成に従って、再構築することで、段階的にナレッジを構造化していきます。",
+        "detail1": "業務フローから逆算した情報整理",
+        "detail2": "最適なディレクトリ構成への再構築",
+        "detail3": "ドキュメント内容の分析とオントロジー作成"
+      },
+      "feature4": {
+        "title": "継続的な監視と更新",
+        "description": "ベースディレクトリの変更を自動検知し、RDBとナレッジグラフを常に最新状態に保ちます。",
+        "detail1": "ファイル変更の自動検知",
+        "detail2": "RDBの自動更新",
+        "detail3": "ナレッジグラフの継続的更新"
+      },
+      "feature5": {
+        "title": "定常業務の自動代行",
+        "description": "営業、マーケティング、人事・総務、バックオフィス、経営企画など、各部門の定常業務をAIエージェントが代行します。",
+        "detail1": "営業エージェント：提案資料の自動生成",
+        "detail2": "マーケティングエージェント：コンテンツ作成",
+        "detail3": "人事・総務エージェント：問い合わせ対応と手続き代行"
+      }
+    },
+    "howitworks": {
+      "tag": "使い方",
+      "title": "たった3ステップで、すぐに使えます",
+      "description": "難しい設定は必要ありません。誰でも簡単に、会社専用のAIアシスタントを作ることができます。",
+      "step1": {
+        "title": "1. 資料をアップロード",
+        "description": "会社にあるPDF、Word、資料などを、ドラッグ＆ドロップで簡単にアップロード。フォルダごとまとめてでもOKです。"
+      },
+      "step2": {
+        "title": "2. AIが自動で読み込み",
+        "description": "アップロードした資料を、AIが自動で読んで理解します。関連する情報同士を繋げて、検索しやすくしてくれます。"
+      },
+      "step3": {
+        "title": "3. 普通に質問するだけ",
+        "description": "「○○の件について教えて」「○○の資料を作って」など、普段の会話のように話しかけるだけ。AIが最適な答えを見つけてくれます。"
+      }
+    },
+    "footer": {
+      "description": "知識グラフとRAGエージェントを構築、評価、監視するための直感的なプラットフォーム。",
+      "navigation": "ナビゲーション",
+      "resources": "リソース",
+      "rights": "All rights reserved."
+    },
+    "testimonials": {
+      "tag": "お客様の声",
+      "title": "導入企業様の声",
+      "description": "GraphSuiteは、業界をリードする多くの企業に信頼されています。",
+      "trusted_by": "以下の企業にご利用いただいています",
+      "testimonial1": {
+        "name": "田中 太郎",
+        "title": "CTO, テックコーポレーション",
+        "text": "GraphSuiteのおかげで、社内に散在していた膨大な量のドキュメントから、必要な情報を瞬時に見つけ出せるようになりました。開発チームの生産性が劇的に向上しました。"
+      },
+      "testimonial2": {
+        "name": "佐藤 花子",
+        "title": "AI部門責任者, イノベート株式会社",
+        "text": "我々のAIチャットボットの応答精度が、GraphSuiteの導入によって飛躍的に向上しました。複雑な顧客からの問い合わせにも、的確に回答できるようになりました。"
+      },
+      "testimonial3": {
+        "name": "山田 次郎",
+        "title": "データサイエンティスト, フューチャーシステムズ",
+        "text": "これまで専門家でなければ探し出せなかった技術文書や研究論文へのアクセスが容易になり、社内の知識共有が活性化しました。素晴らしいツールです。"
+      }
+    },
+    "pricing": {
+      "tag": "料金プラン",
+      "title": "あなたのチームに最適なプランを",
+      "description": "小規模なプロジェクトから、全社的な大規模導入まで、あらゆるニーズに対応するプランをご用意しています。",
+      "plan1": {
+        "name": "Free",
+        "price": "¥0",
+        "description": "個人利用や小規模なチームでの検証に最適です。",
+        "feature1": "月間1,000ドキュメントまで",
+        "feature2": "基本的な検索機能",
+        "feature3": "コミュニティサポート",
+        "cta": "始める"
+      },
+      "plan2": {
+        "name": "Pro",
+        "price": "¥15,000",
+        "description": "より高度な機能を必要とするビジネスチーム向け。",
+        "feature1": "無制限のドキュメント",
+        "feature2": "高度なハイブリッド検索",
+        "feature3": "優先メールサポート",
+        "feature4": "APIアクセス",
+        "cta": "Proを始める"
+      },
+      "plan3": {
+        "name": "Enterprise",
+        "price": "お問い合わせ",
+        "description": "大規模な組織向けのカスタムプラン。",
+        "feature1": "Proプランの全機能",
+        "feature2": "専任のカスタマーサポート",
+        "feature3": "SLA保証",
+        "feature4": "オンプレミス導入オプション",
+        "cta": "お問い合わせ"
+      }
+    },
+    "faq": {
+      "tag": "よくある質問",
+      "title": "FAQ",
+      "description": "ご不明な点がありますか？こちらで回答が見つかるかもしれません。",
+      "q1": {
+        "question": "GraphSuiteはどのような種類のドキュメントをサポートしていますか？",
+        "answer": "PDF、Microsoft Word、PowerPoint、Excel、テキストファイル、HTMLなど、主要なドキュメント形式に幅広く対応しています。詳細はドキュメントをご参照ください。"
+      },
+      "q2": {
+        "question": "セキュリティはどのように確保されていますか？",
+        "answer": "お客様のデータは最高レベルの暗号化技術で保護されており、アクセス制御も厳格に行っています。オンプレミスでの導入オプションも提供しており、お客様のセキュリティポリシーに柔軟に対応可能です。"
+      },
+      "q3": {
+        "question": "導入にはどのくらいの時間がかかりますか？",
+        "answer": "クラウド版であれば、数分でセットアップを完了し、すぐにドキュメントの投入を開始できます。オンプレミス版の導入期間は、お客様の環境によって異なりますので、詳しくはお問い合わせください。"
+      },
+      "q4": {
+        "question": "無料プランと有料プランの違いは何ですか？",
+        "answer": "無料プランでは基本的な機能をお試しいただけます。Proプラン以上では、扱えるドキュメント数が無制限になるほか、より高度な検索機能や優先的なサポート、APIアクセスなどが利用可能になります。"
+      }
+    },
+    "trusted_by": {
+      "title": "業界をリードする企業から信頼されています"
+    },
+    "problems": {
+      "tag": "こんな課題ありませんか？",
+      "title": "あなたの組織では、「知識」が眠っていませんか？",
+      "description": "一つでも当てはまったら、GraphSuiteが力になれるかもしれません。",
+      "problem1": {
+        "title": "情報が見つからない",
+        "description": "従業員の約77%が必要な情報を自力で見つけるのに苦労しています。"
+      },
+      "problem2": {
+        "title": "時間の浪費",
+        "description": "従業員は1日の業務時間のうち平均1時間以上を社内情報の検索に費やしています。"
+      },
+      "problem3": {
+        "title": "情報資産の埋没",
+        "description": "過去の成功事例やノウハウなどの貴重な情報が、活用されずに組織内に埋もれている。"
+      },
+      "problem4": {
+        "title": "ナレッジの属人化",
+        "description": "ノウハウや判断基準が特定の人物や環境に依存し、仕事がスムーズに進まない。"
+      },
+      "summary": "これらの課題は単なる非効率だけではなく、イノベーションを阻害し、従業員のモチベーションを低下させる深刻な経営リスクになります。"
+    },
+    "brain": {
+      "tag": "特徴",
+      "title": "まるで「会社専用の優秀なアシスタント」のように働きます",
+      "subtitle": "GraphSuiteは、常時ドキュメントを同期して“最新の社内知”をキープします。最新化された知識基盤をもとに、エージェントが文書作成・問い合わせ対応・社内手続き等を代行します。",
+      "feature1": {
+        "title": "情報整理",
+        "description": "会社の資料や情報を、関連性を考えて整理します。人、資料、業務を上手く繋げて、必要な情報をすぐに見つけられるようにします。"
+      },
+      "feature2": {
+        "title": "賢い検索",
+        "description": "整理された情報から、質問の意味を理解して最適な答えを見つけます。複雑な質問にも、的確に答えることができます。"
+      },
+      "feature3": {
+        "title": "AIアシスタント",
+        "description": "曖昧な指示でも理解して、情報を集めたり、資料を作ったりを自動でやってくれます。まるで優秀な部下がいるみたいです。"
+      }
+    },
+    "use_cases": {
+        "tag": "こんな場面で活躍",
+        "title": "様々な業務で役に立ちます",
+        "description": "GraphSuiteは、色々な業界や職種の方に使っていただけます。きっとあなたの仕事も楽になるはずです。",
+        "case1": {
+            "title": "お客様対応がスムーズに",
+            "description": "マニュアルや過去の対応履歴から、AIが最適な回答を提案。新人の方でも、ベテランのような対応ができるようになります。"
+        },
+        "case2": {
+            "title": "ベテランの知識を会社の財産に",
+            "description": "経験豊富な方が持つノウハウや技術を、AIが学習して会社全体で共有。退職や異動があっても、大切な知識が失われません。"
+        },
+        "case3": {
+            "title": "部署を超えた情報共有",
+            "description": "部署ごとに分かれていた情報を、AIが横断的に検索。他の部署の有用な情報も簡単に見つけられるようになります。"
+        }
+    },
+    "use_cases_benefits": {
+        "tag": "活用シーンとメリット",
+        "title": "GraphSuiteがあなたの業務を変える",
+        "description": "具体的な業務シーンでGraphSuiteがどのように活用でき、どんなメリットが得られるかをご紹介します。",
+        "case1": {
+            "scenario": "お客様からの問い合わせ対応",
+            "usage": "GraphSuiteは、膨大なマニュアルや過去の対応履歴を整理し、AIが質問内容を理解して最適な回答を即座に提案します。関連する資料や類似の過去事例も自動で表示されるため、新人でもベテランのような的確な対応が可能になります。",
+            "benefit": "問い合わせ対応時間が平均50%短縮され、顧客満足度が向上します。新人の育成期間も大幅に短縮でき、スタッフは複雑な問題解決により多くの時間を使えるようになります。"
+        },
+        "case2": {
+            "scenario": "ベテランの知識継承",
+            "usage": "GraphSuiteは、ベテラン社員の作業手順書、報告書、メモ、さらには口頭で伝えられた知識まで体系的に整理します。AIがこれらの情報を学習し、「このトラブルの時はどうすればいい？」という質問に対して、過去の成功事例や対処法を即座に提示します。",
+            "benefit": "技術継承がスムーズになり、若手社員の成長速度が加速します。ベテランの退職後も、その知識が会社の財産として残り続けるため、品質の維持と業務の安定化が実現します。"
+        },
+        "case3": {
+            "scenario": "部署を超えた情報共有",
+            "usage": "GraphSuiteは、部署の壁を越えて全社の情報を横断的に検索可能にします。営業担当者が「○○業界の導入事例」と検索すれば、技術部門の資料、マーケティング部門の分析レポート、カスタマーサポートの顧客の声まで、関連する情報がすべて一度に見つかります。",
+            "benefit": "提案資料の作成時間が70%削減され、より多くの顧客訪問が可能になります。部署間の情報共有が活発になり、組織全体の連携力が強化されます。また、質の高い提案により受注率も向上します。"
+        }
+    },
+    "benefits": {
+        "tag": "導入するメリット",
+        "title": "GraphSuiteを使うと、こんな良いことがあります",
+        "description": "単なるツールではなく、会社全体の働き方を良くして、みんなが働きやすくなります。",
+        "benefit1": {
+            "title": "時間の節約",
+            "description": "「あの資料どこだっけ？」と探し回る時間がなくなります。その分、もっと大切な仕事に集中できるようになります。"
+        },
+        "benefit2": {
+            "title": "判断が早くなる",
+            "description": "必要な情報がすぐに見つかるので、判断や決断が早くできるようになります。チャンスを逃すことも減るでしょう。"
+        },
+        "benefit3": {
+            "title": "新しいアイデアが生まれる",
+            "description": "今まで気づかなかった情報の繋がりを見つけて、新しいアイデアやビジネスのヒントが見つかるかもしれません。"
+        }
+    },
+    "cta": {
+        "title": "GraphSuite、試してみませんか？",
+        "description": "まずは無料で試してみて、あなたの会社でも使えるかどうか確かめてください。",
+        "button": "無料で試してみる"
+    },
+    "rag_intro": {
+        "tag": "GraphSuiteの技術",
+        "title": "なぜAIが正確な答えを出せるの？",
+        "description": "GraphSuiteのAIは、答えを作る時に必ず会社の資料を確認してから回答します。だから、適当な答えや間違った情報を言うことがありません。いつでも信頼できる、正確な情報だけをお伝えします。"
+    },
+    "comparison": {
+        "tag": "他のAIとの違い",
+        "title": "ChatGPTとは何が違うの？",
+        "description": "一般的なAIとGraphSuiteの一番の違いは、「あなたの会社のことを知っている」ことです。GraphSuiteは、あなたの会社の情報だけを学習します。",
+        "header_feature": "機能",
+        "header_chatgpt": "ChatGPT",
+        "header_traditional_rag": "他の類似ツール",
+        "header_graphsuite": "GraphSuite",
+        "feature1": "会社の情報に基づいた回答",
+        "feature2": "最新の情報への対応",
+        "feature3": "間違った情報を言わない",
+        "feature4": "情報同士の関係を理解した回答"
+    }
+  },
+  "navigation": {
+    "features": "機能",
+    "case_studies": "導入事例",
+    "news": "お知らせ",
+    "pricing": "料金",
+    "faq": "FAQ"
+  },
+  "features_page": {
+    "tag": "機能",
+    "title": "GraphSuiteのパワフルな機能",
+    "description": "GraphSuiteは、エンタープライズレベルの知識グラフ活用に必要なすべてを提供します。",
+    "feature1": {
+        "title": "資料を自動で整理してくれます",
+        "description": "PDF、Word、社内のWiki、音声・動画ファイル、クラウドストレージなど、どんな形式の資料でもAIが読んで整理。関連する情報同士を繋げて、探しやすくしてくれます。"
+    },
+    "feature3": {
+        "title": "ファイル構造を自動で最適化",
+        "description": "散らばったファイルを分析し、機密情報を除外しながら、ナレッジとして活用すべき情報を自動で仕分け。最適なディレクトリ構成を提案します。"
+    },
+    "feature4": {
+        "title": "段階的な構造化アプローチ",
+        "description": "実行すべき業務から逆算して必要なドキュメント、情報を整理します。最適なディレクトリ構成に従って、再構築することで、段階的にナレッジを構造化していきます。"
+    },
+    "feature5": {
+        "title": "継続的な監視と更新",
+        "description": "ベースディレクトリの変更を自動検知し、RDBとナレッジグラフを常に最新状態に保ちます。"
+    },
+    "feature7": {
+        "title": "定常業務の自動代行",
+        "description": "営業、マーケティング、人事・総務、バックオフィス、経営企画など、各部門の定常業務をAIエージェントが代行します。"
+    },
+    "summary": {
+        "title": "エンタープライズ対応の包括的な機能",
+        "description": "GraphSuiteは、スケーラビリティ、セキュリティ、そして高度な管理機能を備え、あらゆる規模の組織の要求に応えます。",
+        "feature1": {
+            "title": "柔軟なデプロイメント",
+            "description": "クラウド、オンプレミス、ハイブリッド環境など、お客様の要件に合わせた柔軟なデプロイメントが可能です。"
+        },
+        "feature2": {
+            "title": "アクセス制御",
+            "description": "ドキュメントやデータソースごとに詳細なアクセス権限を設定でき、セキュアな情報共有を実現します。"
+        },
+        "feature3": {
+            "title": "パフォーマンス監視",
+            "description": "システムの利用状況や検索クエリ、応答精度などをダッシュボードで可視化し、継続的な改善をサポートします。"
+        },
+        "feature4": {
+            "title": "多言語対応",
+            "description": "日本語、英語、中国語をはじめとする複数の言語に対応し、グローバルなビジネス環境での利用を促進します。"
+        },
+        "feature5": {
+            "title": "継続的な監視と更新",
+            "description": "ファイル変更の自動検知、RDBの自動更新、ナレッジグラフの継続的更新により、常に最新の情報を維持します。"
+        },
+        "feature6": {
+            "title": "定常業務の自動代行",
+            "description": "営業エージェント、マーケティングエージェント、人事・総務エージェントにより、各部門の定常業務を自動化できます。"
+        }
+    }
+  },
+  "case_studies_page": {
+    "tag": "導入事例",
+    "title": "様々なお客様に導入いただいています",
+    "description": "GraphSuiteがどのようにビジネスの課題解決に貢献しているか、実際の事例をご覧ください。",
+    "coming_soon": "導入事例ページのコンテンツは現在準備中です。",
+    "read_more": "詳しく見る",
+    "case1": {
+        "title": "製造業における技術伝承の効率化",
+        "description": "熟練技術者のノウハウを知識グラフ化し、若手へのスムーズな技術伝承を実現。"
+    },
+    "case2": {
+        "title": "金融機関でのコンプライアンスチェック自動化",
+        "description": "膨大な規制文書を知識グラフに取り込み、コンプライアンス違反のリスクをリアルタイムに検知。"
+    },
+    "case3": {
+        "title": "製薬会社での研究開発の加速",
+        "description": "論文や特許情報を横断的に解析し、新たな創薬ターゲットの発見を支援。"
+    }
+  },
+  "news_page": {
+    "tag": "お知らせ",
+    "title": "最新情報",
+    "description": "GraphSuiteの最新アップデートやイベント情報などをお届けします。",
+    "coming_soon": "お知らせページのコンテンツは現在準備中です。",
+    "news1": {
+        "title": "GraphSuite v2.0をリリースしました",
+        "description": "RAGエージェントの作成機能が強化され、より自然な対話が可能になりました。"
+    },
+    "news2": {
+        "title": "大規模言語モデルに関するウェビナーを開催します",
+        "description": "来る10月15日に、LLMの最新動向とビジネス活用に関するオンラインセミナーを実施します。"
+    },
+    "news3": {
+        "title": "セキュリティ機能を強化しました",
+        "description": "エンタープライズ利用に対応するため、アクセス制御や監査ログなどのセキュリティ機能を大幅に強化しました。"
+    }
+  }
+}

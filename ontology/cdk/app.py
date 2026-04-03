@@ -5,7 +5,6 @@ from pathlib import Path
 from aws_cdk import App
 from aws_cdk import Environment
 
-from stacks.aurora_stack import AuroraStack
 from stacks.monitoring_stack import MonitoringStack
 from stacks.ontology_stack import OntologyStack
 
@@ -38,40 +37,28 @@ governance_finding_table_name = env_config.get(
     "governanceFindingTableName", "AIReadyGov-ExposureFinding"
 )
 document_analysis_table_name = env_config.get(
-    "documentAnalysisTableName", "AIReady-DocumentAnalysis"
-)
-
-aurora_stack = AuroraStack(
-    app,
-    f"{stack_prefix}-AuroraStack",
-    tenant_id=tenant_id,
-    shared_vpc_id=shared_vpc_id,
-    env=deployment_env,
+    "documentAnalysisTableName", "AIReadyGov-DocumentAnalysis"
 )
 
 ontology_stack = OntologyStack(
     app,
     f"{stack_prefix}-CoreStack",
     tenant_id=tenant_id,
-    aurora_secret_arn=aurora_stack.aurora_secret.secret_arn,
-    aurora_proxy_endpoint=aurora_stack.rds_proxy.endpoint,
-    aurora_db_name="ai_ready_ontology",
-    aurora_username="ontology_app",
     alert_email=alert_email,
-    vpc=aurora_stack.vpc,
-    lambda_security_group=aurora_stack.lambda_sg,
+    shared_vpc_id=shared_vpc_id,
     connect_file_metadata_table_name=connect_file_metadata_table_name,
     connect_file_metadata_stream_arn=connect_file_metadata_stream_arn,
     governance_finding_table_name=governance_finding_table_name,
     document_analysis_table_name=document_analysis_table_name,
     env=deployment_env,
 )
-ontology_stack.add_dependency(aurora_stack)
 
 MonitoringStack(
     app,
     f"{stack_prefix}-MonitoringStack",
     tenant_id=tenant_id,
+    state_machine_arn=None,
+    alert_topic_arn=ontology_stack.alert_topic_arn,
     env=deployment_env,
 )
 

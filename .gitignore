@@ -39,3 +39,26 @@ htmlcov/
 # Archived debug/test files
 old/debug_logs/
 old/test_artifacts/
+
+*.db
+*.md
+*.pdf
+
+connect/tests/*
+governance/tests/*
+ontology/tests/*
+cdk*
+back/*
+.cursor/*
+.github/*
+.tmp_runtime_check/*
+test/*
+api/tests/*
+api/scripts/*
+connect/scripts/*
+governance/scripts/*
+ontology/scripts/*
+
+# keep only this AWS scenario test tracked
+!governance/tests/aws/
+!governance/tests/aws/test_ft_tenant_alpha_abcd_expected.py

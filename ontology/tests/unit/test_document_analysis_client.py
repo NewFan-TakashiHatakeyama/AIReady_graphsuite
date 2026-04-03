@@ -31,6 +31,14 @@ def _setup(monkeypatch):
     return table
 
 
+def _setup_with_governance_env(monkeypatch):
+    table = _Table()
+    monkeypatch.delenv("DOCUMENT_ANALYSIS_TABLE", raising=False)
+    monkeypatch.setenv("GOVERNANCE_DOCUMENT_ANALYSIS_TABLE_NAME", "analysis")
+    monkeypatch.setattr(document_analysis_client, "_dynamodb_resource", _Dynamo(table))
+    return table
+
+
 def test_get_document_analysis_returns_item(monkeypatch) -> None:
     table = _setup(monkeypatch)
     table.put_item(
@@ -76,3 +84,26 @@ def test_is_analysis_completed_status_matrix(monkeypatch) -> None:
     )
     assert document_analysis_client.is_analysis_completed("tenant-1", "failed") is False
     assert document_analysis_client.is_analysis_completed("tenant-1", "missing") is False
+
+    table.put_item(
+        Item={
+            "tenant_id": "tenant-1",
+            "item_id": "legacy-summary-only",
+            "summary": "done",
+        }
+    )
+    assert document_analysis_client.is_analysis_completed("tenant-1", "legacy-summary-only") is True
+
+
+def test_get_document_analysis_uses_governance_table_env(monkeypatch) -> None:
+    table = _setup_with_governance_env(monkeypatch)
+    table.put_item(
+        Item={
+            "tenant_id": "tenant-1",
+            "item_id": "item-2",
+            "analysis_status": "completed",
+        }
+    )
+    result = document_analysis_client.get_document_analysis("tenant-1", "item-2")
+    assert result is not None
+    assert result["analysis_status"] == "completed"

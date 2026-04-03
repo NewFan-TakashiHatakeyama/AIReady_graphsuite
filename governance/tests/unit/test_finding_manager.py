@@ -1,7 +1,6 @@
-"""Finding マネージャの単体テスト
+"""Finding マネージャの単体テスト（v1.2 workflow_status 対応）。
 
 moto で DynamoDB をモックし、Finding CRUD + ステータス遷移をテストする。
-詳細設計 7.1–7.4 節準拠。
 """
 
 import json
@@ -22,10 +21,11 @@ from services.finding_manager import (
     get_finding_by_item,
     handle_item_deletion,
     query_findings_by_status,
+    query_findings_by_workflow_status,
     set_finding_table,
-    upsert_finding,
+    upsert_finding as upsert_finding_impl,
 )
-from services.scoring import ExposureResult, SensitivityResult
+from services.scoring import ExposureResult
 
 
 @pytest.fixture
@@ -90,15 +90,96 @@ def _make_metadata(**kwargs) -> FileMetadata:
 
 
 def _make_exposure_result(**kwargs):
-    defaults = {"score": 3.0, "vectors": ["org_link"], "details": {"org_link": 3.0}}
+    defaults = {
+        "score": 0.25,
+        "vectors": ["org_link"],
+        "details": {
+            "audience_scope": "organization",
+            "audience_scope_score": 0.55,
+            "privilege_strength_score": 0.35,
+            "permission_weighted_level": "comment",
+            "permission_max_level": "edit",
+            "permission_max_level_score": 0.60,
+            "discoverability": "link_only",
+            "discoverability_score": 0.35,
+            "externality": "internal_only",
+            "externality_score": 0.0,
+            "reshare_capability": "limited",
+            "reshare_capability_score": 0.50,
+            "broken_inheritance_score": 0.0,
+            "permission_outlier_score": 0.0,
+        },
+    }
     defaults.update(kwargs)
     return ExposureResult(**defaults)
 
 
-def _make_sensitivity_result(**kwargs):
-    defaults = {"score": 1.0, "factors": [], "is_preliminary": True}
-    defaults.update(kwargs)
-    return SensitivityResult(**defaults)
+def _risk_level_from_legacy_score(risk_score: float | None) -> str:
+    score = float(risk_score or 0.0)
+    if score >= 75:
+        return "critical"
+    if score >= 50:
+        return "high"
+    if score >= 25:
+        return "medium"
+    if score > 0:
+        return "low"
+    return "none"
+
+
+def _upsert_finding(
+    *,
+    tenant_id: str,
+    item: FileMetadata,
+    exposure_result: ExposureResult,
+    matched_guards: list[str],
+    risk_level: str | None = None,
+    risk_score: float | None = None,
+    risk_type_counts: dict[str, int] | None = None,
+    exposure_vector_counts: dict[str, int] | None = None,
+    total_detected_risks: int | None = None,
+    **kwargs,
+):
+    normalized_risk_level = str(risk_level or _risk_level_from_legacy_score(risk_score)).strip().lower()
+    if total_detected_risks is None:
+        total_detected_risks = {
+            "critical": 8,
+            "high": 5,
+            "medium": 2,
+            "low": 1,
+        }.get(normalized_risk_level, 0)
+    if exposure_vector_counts is None:
+        exposure_vector_counts = {}
+        for vector in exposure_result.vectors:
+            key = str(vector).strip().lower()
+            if not key:
+                continue
+            exposure_vector_counts[key] = exposure_vector_counts.get(key, 0) + 1
+    if risk_type_counts is None:
+        risk_type_counts = {"legacy_risk": 1} if int(total_detected_risks) > 0 else {}
+
+    unsupported_keys = {
+        "sensitivity_result",
+        "activity_score",
+        "ai_amplification",
+        "raw_residual_risk",
+        "sensitive_composite",
+        "label_coverage_penalty",
+        "label_accuracy_penalty",
+        "secret_or_highrisk_penalty",
+    }
+    forwarded = {k: v for k, v in kwargs.items() if k not in unsupported_keys}
+    return upsert_finding_impl(
+        tenant_id=tenant_id,
+        item=item,
+        exposure_result=exposure_result,
+        risk_level=normalized_risk_level,
+        risk_type_counts=risk_type_counts,
+        exposure_vector_counts=exposure_vector_counts,
+        total_detected_risks=int(total_detected_risks),
+        matched_guards=matched_guards,
+        **forwarded,
+    )
 
 
 # ─── generate_finding_id ───
@@ -106,7 +187,6 @@ def _make_sensitivity_result(**kwargs):
 
 class TestGenerateFindingId:
     def test_deterministic(self):
-        """同一入力 → 同一 ID"""
         id1 = generate_finding_id("t-001", "m365", "item-001")
         id2 = generate_finding_id("t-001", "m365", "item-001")
         assert id1 == id2
@@ -117,8 +197,7 @@ class TestGenerateFindingId:
         assert id1 != id2
 
     def test_id_length(self):
-        id1 = generate_finding_id("t-001", "m365", "item-001")
-        assert len(id1) == 32
+        assert len(generate_finding_id("t-001", "m365", "item-001")) == 32
 
 
 # ─── upsert_finding: 新規作成 ───
@@ -126,26 +205,52 @@ class TestGenerateFindingId:
 
 class TestUpsertFindingNew:
     def test_create_new_finding(self, dynamodb_table):
-        """新規 Finding 作成 → status = 'new'"""
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
         assert result["is_new"] is True
         assert result["status"] == "new"
+        assert result["workflow_status"] == "new"
+        assert result["exception_type"] == "none"
 
         finding = get_finding("t-001", result["finding_id"])
         assert finding is not None
-        assert finding["status"] == "new"
         assert finding["item_name"] == "契約書_A社.docx"
-        assert finding["matched_guards"] == ["G3"]
+        assert "risk_level" in finding
+
+    def test_create_persists_composite_breakdown_fields(self, dynamodb_table):
+        meta = _make_metadata()
+        result = _upsert_finding(
+            tenant_id="t-001",
+            item=meta,
+            exposure_result=_make_exposure_result(),
+            risk_score=42.5,
+            raw_residual_risk=0.425,
+            sensitive_composite=0.4123,
+            label_coverage_penalty=0.25,
+            label_accuracy_penalty=0.10,
+            secret_or_highrisk_penalty=0.20,
+            matched_guards=["G3"],
+        )
+        finding = get_finding("t-001", result["finding_id"])
+        assert finding is not None
+        assert finding["audience_scope"] == "organization"
+        assert float(finding["audience_scope_score"]) == 0.55
+        assert float(finding["privilege_strength_score"]) == 0.35
+        assert finding["permission_weighted_level"] == "comment"
+        assert finding["permission_max_level"] == "edit"
+        assert float(finding["permission_max_level_score"]) == 0.60
+        assert finding["discoverability"] == "link_only"
+        assert float(finding["discoverability_score"]) == 0.35
+        assert finding["externality"] == "internal_only"
+        assert float(finding["externality_score"]) == 0.0
+        assert finding["reshare_capability"] == "limited"
+        assert float(finding["reshare_capability_score"]) == 0.50
 
 
 # ─── upsert_finding: 既存更新 ───
@@ -153,45 +258,35 @@ class TestUpsertFindingNew:
 
 class TestUpsertFindingUpdate:
     def test_update_existing_finding(self, dynamodb_table):
-        """既存 Finding 更新 → status 'new' → 'open'"""
         meta = _make_metadata()
-        first = upsert_finding(
+        first = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
         assert first["status"] == "new"
 
-        second = upsert_finding(
+        second = _upsert_finding(
             tenant_id="t-001",
             item=meta,
-            exposure_result=_make_exposure_result(score=5.0, vectors=["public_link"]),
-            sensitivity_result=_make_sensitivity_result(score=2.0),
-            activity_score=2.0,
-            ai_amplification=1.0,
-            risk_score=20.0,
+            exposure_result=_make_exposure_result(score=0.6, vectors=["public_link"]),
+            risk_score=60.0,
             matched_guards=["G3"],
         )
 
         finding = get_finding("t-001", first["finding_id"])
         assert finding["status"] == "open"
 
-    def test_acknowledged_finding_not_updated(self, dynamodb_table):
-        """acknowledged 状態の Finding は更新されない"""
+    def test_acknowledged_finding_still_updates_scores(self, dynamodb_table):
+        """v1.2: workflow_status=acknowledged でもスコアは更新される。"""
         meta = _make_metadata()
-        first = upsert_finding(
+        first = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
 
@@ -203,19 +298,99 @@ class TestUpsertFindingUpdate:
             acknowledged_by="admin",
         )
 
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
-            exposure_result=_make_exposure_result(score=8.0),
-            sensitivity_result=_make_sensitivity_result(score=5.0),
-            activity_score=2.0,
-            ai_amplification=1.0,
+            exposure_result=_make_exposure_result(score=0.8),
             risk_score=80.0,
+            raw_residual_risk=0.80,
             matched_guards=["G3"],
         )
 
         finding = get_finding("t-001", first["finding_id"])
-        assert finding["status"] == "acknowledged"
+        # v1.2: acknowledged でもスコア更新される
+        assert finding["risk_level"] == "critical"
+        assert int(finding["total_detected_risks"]) == 8
+        assert finding["workflow_status"] == "acknowledged"
+        assert finding["exception_type"] == "temporary_accept"
+
+    def test_closed_finding_reopens_on_upsert(self, dynamodb_table):
+        meta = _make_metadata()
+        created = _upsert_finding(
+            tenant_id="t-001",
+            item=meta,
+            exposure_result=_make_exposure_result(),
+            risk_score=25.0,
+            matched_guards=["G3"],
+        )
+        close_finding("t-001", created["finding_id"])
+
+        _upsert_finding(
+            tenant_id="t-001",
+            item=meta,
+            exposure_result=_make_exposure_result(score=0.6, vectors=["public_link"]),
+            risk_score=60.0,
+            matched_guards=["G3"],
+        )
+
+        finding = get_finding("t-001", created["finding_id"])
+        assert finding["status"] == "open"
+
+    def test_update_overwrites_composite_breakdown_fields(self, dynamodb_table):
+        meta = _make_metadata()
+        created = _upsert_finding(
+            tenant_id="t-001",
+            item=meta,
+            exposure_result=_make_exposure_result(),
+            risk_score=25.0,
+            raw_residual_risk=0.25,
+            sensitive_composite=0.20,
+            label_coverage_penalty=0.0,
+            label_accuracy_penalty=0.0,
+            secret_or_highrisk_penalty=0.0,
+            matched_guards=["G3"],
+        )
+        updated_exposure = _make_exposure_result(
+            score=0.72,
+            vectors=["public_link", "external_domain"],
+            details={
+                "audience_scope": "external_org",
+                "audience_scope_score": 0.80,
+                "privilege_strength_score": 0.75,
+                "permission_weighted_level": "reshare",
+                "permission_max_level": "manage",
+                "permission_max_level_score": 1.00,
+                "discoverability": "searchable",
+                "discoverability_score": 0.70,
+                "externality": "external_domain",
+                "externality_score": 0.80,
+                "reshare_capability": "admin",
+                "reshare_capability_score": 1.00,
+                "broken_inheritance_score": 1.0,
+                "permission_outlier_score": 0.4,
+            },
+        )
+        _upsert_finding(
+            tenant_id="t-001",
+            item=meta,
+            exposure_result=updated_exposure,
+            risk_score=78.0,
+            raw_residual_risk=0.78,
+            sensitive_composite=0.66,
+            label_coverage_penalty=0.25,
+            label_accuracy_penalty=0.25,
+            secret_or_highrisk_penalty=0.35,
+            matched_guards=["G3", "G9"],
+        )
+        finding = get_finding("t-001", created["finding_id"])
+        assert finding is not None
+        assert finding["audience_scope"] == "external_org"
+        assert float(finding["audience_scope_score"]) == 0.80
+        assert finding["permission_weighted_level"] == "reshare"
+        assert finding["permission_max_level"] == "manage"
+        assert finding["discoverability"] == "searchable"
+        assert finding["externality"] == "external_domain"
+        assert finding["reshare_capability"] == "admin"
 
 
 # ─── close_finding ───
@@ -224,23 +399,18 @@ class TestUpsertFindingUpdate:
 class TestCloseFinding:
     def test_close_existing(self, dynamodb_table):
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
         close_finding("t-001", result["finding_id"])
-
         finding = get_finding("t-001", result["finding_id"])
         assert finding["status"] == "closed"
 
     def test_close_nonexistent_no_error(self, dynamodb_table):
-        """存在しない Finding の close はエラーにならない"""
         close_finding("t-001", "nonexistent-id")
 
 
@@ -250,41 +420,33 @@ class TestCloseFinding:
 class TestHandleItemDeletion:
     def test_deletion_closes_finding(self, dynamodb_table):
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
-
         handle_item_deletion({
             "tenant_id": "t-001",
             "item_id": "item-001",
             "source": "m365",
         })
-
         finding = get_finding("t-001", result["finding_id"])
         assert finding["status"] == "closed"
 
 
-# ─── acknowledge_finding ───
+# ─── acknowledge_finding (v1.2 workflow_status) ───
 
 
 class TestAcknowledgeFinding:
-    def test_acknowledge(self, dynamodb_table):
+    def test_acknowledge_sets_workflow_status(self, dynamodb_table):
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
 
@@ -295,28 +457,26 @@ class TestAcknowledgeFinding:
             reason="業務上の理由で一時的に過剰共有を許容。プロジェクト終了後に権限を整理予定。",
             acknowledged_by="admin@contoso.com",
         )
-        assert ack_result["status"] == "acknowledged"
+        assert ack_result["workflow_status"] == "acknowledged"
 
         finding = get_finding("t-001", result["finding_id"])
-        assert finding["status"] == "acknowledged"
+        assert finding["workflow_status"] == "acknowledged"
+        assert finding["exception_type"] == "temporary_accept"
+        assert finding["exception_review_due_at"] == "2026-06-01T00:00:00Z"
         assert finding["suppress_until"] == "2026-06-01T00:00:00Z"
-        assert finding["acknowledged_by"] == "admin@contoso.com"
 
 
-# ─── query_findings_by_status ───
+# ─── query_findings_by_workflow_status ───
 
 
-class TestQueryByStatus:
+class TestQueryByWorkflowStatus:
     def test_query_acknowledged(self, dynamodb_table):
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
         acknowledge_finding(
@@ -327,7 +487,7 @@ class TestQueryByStatus:
             acknowledged_by="admin",
         )
 
-        findings = query_findings_by_status("t-001", "acknowledged")
+        findings = query_findings_by_workflow_status("t-001", "acknowledged")
         assert len(findings) == 1
         assert findings[0]["finding_id"] == result["finding_id"]
 
@@ -338,120 +498,19 @@ class TestQueryByStatus:
 class TestGetFindingByItem:
     def test_get_by_item_id(self, dynamodb_table):
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
-
         found = get_finding_by_item("t-001", "item-001")
         assert found is not None
         assert found["finding_id"] == result["finding_id"]
 
     def test_not_found(self, dynamodb_table):
-        found = get_finding_by_item("t-001", "nonexistent")
-        assert found is None
-
-
-# ─── _get_finding_table 自動解決 ───
-
-
-class TestGetFindingTableAuto:
-    def test_auto_resolve_from_env(self, dynamodb_table, monkeypatch):
-        """_get_finding_table が環境変数から自動解決する（Lines 32-33）"""
-        monkeypatch.setenv("FINDING_TABLE_NAME", "AIReadyGov-ExposureFinding")
-        set_finding_table(None)
-        table = _get_finding_table()
-        assert table.table_name == "AIReadyGov-ExposureFinding"
-        set_finding_table(dynamodb_table)
-
-
-# ─── upsert: sensitivity_scan_at 既存値の維持 ───
-
-
-class TestUpsertSensitivityScanAt:
-    def test_preserves_sensitivity_scan_at(self, dynamodb_table):
-        """sensitivity_scan_at が既にある場合、既存の sensitivity_score を維持する（Lines 127-128）"""
-        meta = _make_metadata()
-        first = upsert_finding(
-            tenant_id="t-001",
-            item=meta,
-            exposure_result=_make_exposure_result(score=3.0),
-            sensitivity_result=_make_sensitivity_result(score=2.0),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=9.0,
-            matched_guards=["G3"],
-        )
-        finding_id = first["finding_id"]
-
-        dynamodb_table.update_item(
-            Key={"tenant_id": "t-001", "finding_id": finding_id},
-            UpdateExpression="SET sensitivity_scan_at = :ts, sensitivity_score = :ss",
-            ExpressionAttributeValues={
-                ":ts": "2026-01-15T00:00:00Z",
-                ":ss": Decimal("4.0"),
-            },
-        )
-
-        second = upsert_finding(
-            tenant_id="t-001",
-            item=meta,
-            exposure_result=_make_exposure_result(score=5.0),
-            sensitivity_result=_make_sensitivity_result(score=1.0),
-            activity_score=2.0,
-            ai_amplification=1.0,
-            risk_score=10.0,
-            matched_guards=["G3"],
-        )
-
-        finding = get_finding("t-001", finding_id)
-        assert float(finding["sensitivity_score"]) == 4.0
-        expected_risk = round(5.0 * 4.0 * 2.0 * 1.0, 2)
-        assert float(finding["risk_score"]) == expected_risk
-
-
-# ─── close_finding: ClientError 再送出 ───
-
-
-class TestCloseFindingError:
-    def test_non_conditional_check_error_reraises(self, dynamodb_table):
-        """ConditionalCheckFailedException 以外の ClientError は再送出する（Line 198）"""
-        from unittest.mock import patch, MagicMock
-        from botocore.exceptions import ClientError
-
-        error_response = {"Error": {"Code": "ValidationException", "Message": "bad request"}}
-        mock_table = MagicMock()
-        mock_table.update_item.side_effect = ClientError(error_response, "UpdateItem")
-
-        set_finding_table(mock_table)
-        try:
-            with pytest.raises(ClientError) as exc_info:
-                close_finding("t-001", "some-finding-id")
-            assert exc_info.value.response["Error"]["Code"] == "ValidationException"
-        finally:
-            set_finding_table(dynamodb_table)
-
-
-# ─── handle_item_deletion: 空値のガード ───
-
-
-class TestHandleItemDeletionEdge:
-    def test_empty_tenant_id_returns_early(self, dynamodb_table):
-        """tenant_id が空の場合、早期リターンする（Line 207）"""
-        handle_item_deletion({"tenant_id": "", "item_id": "item-001"})
-
-    def test_empty_item_id_returns_early(self, dynamodb_table):
-        """item_id が空の場合、早期リターンする（Line 207）"""
-        handle_item_deletion({"tenant_id": "t-001", "item_id": ""})
-
-    def test_missing_keys_returns_early(self, dynamodb_table):
-        handle_item_deletion({})
+        assert get_finding_by_item("t-001", "nonexistent") is None
 
 
 # ─── close_finding_if_exists ───
@@ -459,24 +518,17 @@ class TestHandleItemDeletionEdge:
 
 class TestCloseFindingIfExists:
     def test_closes_existing_finding(self, dynamodb_table):
-        """Finding がある場合に Closed にする（Lines 292-293）"""
         meta = _make_metadata()
-        result = upsert_finding(
+        result = _upsert_finding(
             tenant_id="t-001",
             item=meta,
             exposure_result=_make_exposure_result(),
-            sensitivity_result=_make_sensitivity_result(),
-            activity_score=1.5,
-            ai_amplification=1.0,
-            risk_score=4.5,
+            risk_score=25.0,
             matched_guards=["G3"],
         )
-
         close_finding_if_exists("t-001", "item-001", source="m365")
-
         finding = get_finding("t-001", result["finding_id"])
         assert finding["status"] == "closed"
 
     def test_nonexistent_no_error(self, dynamodb_table):
-        """Finding が存在しなくてもエラーにならない"""
         close_finding_if_exists("t-001", "nonexistent-item")

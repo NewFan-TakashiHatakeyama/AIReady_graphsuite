@@ -99,18 +99,25 @@ def _setup(monkeypatch):
     return unified, doc_analysis, lineage_calls, metrics
 
 
+def _governance_low(**overrides) -> dict:
+    base = {
+        "risk_level": "low",
+        "pii_detected": False,
+        "ai_eligible": True,
+        "status": "open",
+        "finding_id": "f-low",
+        "classification": "internal",
+    }
+    base.update(overrides)
+    return base
+
+
 def test_ut_st_001_insert_normal_transform(monkeypatch) -> None:
     unified, _, lineage_calls, _ = _setup(monkeypatch)
     monkeypatch.setattr(
         schema_transform,
         "lookup_governance_finding",
-        lambda **kwargs: {
-            "risk_level": "none",
-            "pii_detected": False,
-            "ai_eligible": True,
-            "finding_id": None,
-            "classification": "internal",
-        },
+        lambda **kwargs: _governance_low(),
     )
 
     result = schema_transform.handler(
@@ -131,7 +138,7 @@ def test_ut_st_002_modify_updates_transform(monkeypatch) -> None:
     monkeypatch.setattr(
         schema_transform,
         "lookup_governance_finding",
-        lambda **kwargs: dict(schema_transform.DEFAULT_GOVERNANCE_RESULT),
+        lambda **kwargs: _governance_low(),
     )
 
     schema_transform.handler(
@@ -199,17 +206,13 @@ def test_ut_st_006_risk_high_forces_ai_ineligible(monkeypatch) -> None:
             "risk_level": "high",
             "pii_detected": True,
             "ai_eligible": True,
+            "status": "open",
             "finding_id": "f-1",
             "classification": "confidential",
         },
     )
-    schema_transform.handler(
-        {"Records": [_stream_record(new_image=_default_new_image())]},
-        None,
-    )
-    item = unified.items[("tenant-1", "item-1")]
-    assert item["risk_level"] == "high"
-    assert item["ai_eligible"] is False
+    schema_transform.handler({"Records": [_stream_record(new_image=_default_new_image())]}, None)
+    assert ("tenant-1", "item-1") not in unified.items
 
 
 def test_ut_st_007_no_finding_defaults(monkeypatch) -> None:
@@ -217,18 +220,20 @@ def test_ut_st_007_no_finding_defaults(monkeypatch) -> None:
     monkeypatch.setattr(
         schema_transform,
         "lookup_governance_finding",
-        lambda **kwargs: dict(schema_transform.DEFAULT_GOVERNANCE_RESULT),
+        lambda **kwargs: {
+            **schema_transform.DEFAULT_GOVERNANCE_RESULT,
+            "status": "open",
+            "ai_eligible": True,
+        },
     )
     schema_transform.handler(
         {"Records": [_stream_record(new_image=_default_new_image())]},
         None,
     )
-    item = unified.items[("tenant-1", "item-1")]
-    assert item["risk_level"] == "none"
-    assert item["pii_detected"] is False
+    assert ("tenant-1", "item-1") in unified.items
 
 
-def test_ut_st_008_finding_error_uses_defaults(monkeypatch) -> None:
+def test_ut_st_008_finding_error_uses_defaults_then_skips_closed(monkeypatch) -> None:
     unified, _, _, _ = _setup(monkeypatch)
     monkeypatch.setattr(
         schema_transform,
@@ -239,9 +244,7 @@ def test_ut_st_008_finding_error_uses_defaults(monkeypatch) -> None:
         {"Records": [_stream_record(new_image=_default_new_image())]},
         None,
     )
-    item = unified.items[("tenant-1", "item-1")]
-    assert item["risk_level"] == "none"
-    assert item["ai_eligible"] is True
+    assert ("tenant-1", "item-1") not in unified.items
 
 
 def test_ut_st_009_risk_critical_forces_ai_ineligible(monkeypatch) -> None:
@@ -253,6 +256,7 @@ def test_ut_st_009_risk_critical_forces_ai_ineligible(monkeypatch) -> None:
             "risk_level": "critical",
             "pii_detected": True,
             "ai_eligible": True,
+            "status": "open",
             "finding_id": "f-2",
             "classification": "top-secret",
         },
@@ -261,7 +265,7 @@ def test_ut_st_009_risk_critical_forces_ai_ineligible(monkeypatch) -> None:
         {"Records": [_stream_record(new_image=_default_new_image())]},
         None,
     )
-    assert unified.items[("tenant-1", "item-1")]["ai_eligible"] is False
+    assert ("tenant-1", "item-1") not in unified.items
 
 
 def test_ut_st_010_freshness_status_calculated(monkeypatch) -> None:
@@ -269,7 +273,7 @@ def test_ut_st_010_freshness_status_calculated(monkeypatch) -> None:
     monkeypatch.setattr(
         schema_transform,
         "lookup_governance_finding",
-        lambda **kwargs: dict(schema_transform.DEFAULT_GOVERNANCE_RESULT),
+        lambda **kwargs: _governance_low(),
     )
     schema_transform.handler(
         {
@@ -291,7 +295,7 @@ def test_ut_st_011_document_analysis_completed_enriched(monkeypatch) -> None:
     monkeypatch.setattr(
         schema_transform,
         "lookup_governance_finding",
-        lambda **kwargs: dict(schema_transform.DEFAULT_GOVERNANCE_RESULT),
+        lambda **kwargs: _governance_low(),
     )
     doc_analysis.put_item(
         Item={
@@ -313,3 +317,38 @@ def test_ut_st_011_document_analysis_completed_enriched(monkeypatch) -> None:
     item = unified.items[("tenant-1", "item-1")]
     assert item["document_summary"] == "summary text"
     assert item["embedding_ref"] == "tenant-1/item-1"
+    assert "document_profile" in str(item.get("extensions") or "")
+
+
+def test_ut_st_012_png_is_excluded_even_when_risk_low(monkeypatch) -> None:
+    unified, _, _, _ = _setup(monkeypatch)
+    monkeypatch.setattr(schema_transform, "lookup_governance_finding", lambda **kwargs: _governance_low())
+    schema_transform.handler(
+        {
+            "Records": [
+                _stream_record(
+                    new_image=_default_new_image(
+                        name={"S": "diagram.png"},
+                        mime_type={"S": "image/png"},
+                        path={"S": "/images/diagram.png"},
+                    )
+                )
+            ]
+        },
+        None,
+    )
+    assert ("tenant-1", "item-1") not in unified.items
+
+
+def test_ut_st_013_closed_finding_skips_ontology_ingest(monkeypatch) -> None:
+    unified, _, _, _ = _setup(monkeypatch)
+    monkeypatch.setattr(
+        schema_transform,
+        "lookup_governance_finding",
+        lambda **kwargs: _governance_low(status="closed"),
+    )
+    schema_transform.handler(
+        {"Records": [_stream_record(new_image=_default_new_image())]},
+        None,
+    )
+    assert ("tenant-1", "item-1") not in unified.items

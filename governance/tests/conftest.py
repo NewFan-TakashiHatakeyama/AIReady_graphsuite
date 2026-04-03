@@ -1,9 +1,15 @@
 """共通テスト設定"""
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
+
+# pytest 実行ディレクトリに依存せず `handlers.*` / `services.*` を import できるようにする。
+GOVERNANCE_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(GOVERNANCE_SRC) not in sys.path:
+    sys.path.insert(0, str(GOVERNANCE_SRC))
 
 
 def pytest_addoption(parser):
@@ -39,7 +45,7 @@ def aws_env(request, monkeypatch):
     monkeypatch.setenv("AWS_SESSION_TOKEN", "testing")
     monkeypatch.setenv("FINDING_TABLE_NAME", "AIReadyGov-ExposureFinding")
     monkeypatch.setenv("SENSITIVITY_QUEUE_URL", "https://sqs.ap-northeast-1.amazonaws.com/123456789012/AIReadyGov-SensitivityDetectionQueue")
-    monkeypatch.setenv("RAW_PAYLOAD_BUCKET", "aireadyconnect-raw-payload-123456789012")
-    monkeypatch.setenv("REPORT_BUCKET", "aireadygov-reports-123456789012")
+    monkeypatch.setenv("RAW_PAYLOAD_BUCKET", "aireadyconnect-raw-payload")
+    monkeypatch.setenv("REPORT_BUCKET", "aireadygov-reports")
     monkeypatch.setenv("CONNECT_TABLE_NAME", "AIReadyConnect-FileMetadata")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")

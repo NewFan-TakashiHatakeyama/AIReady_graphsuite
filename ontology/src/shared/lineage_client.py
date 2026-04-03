@@ -1,4 +1,4 @@
-"""Helper for invoking lineageRecorder Lambda synchronously."""
+"""lineageRecorder 呼び出しユーティリティ。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,17 @@ _lambda_client: BaseClient | None = None
 
 
 def _get_lambda_client() -> BaseClient:
+    """Lambda クライアントを遅延初期化で取得する。
+
+    Args:
+        なし。
+
+    Returns:
+        BaseClient: 処理結果。
+
+    Notes:
+        lineage 呼び出しのたびに client を再生成しないようにする。
+    """
     global _lambda_client
     if _lambda_client is None:
         _lambda_client = boto3.client("lambda")
@@ -38,7 +49,27 @@ def record_lineage_event(
     tenant_id: str | None = None,
     lambda_client: BaseClient | None = None,
 ) -> dict[str, Any] | None:
-    """Invoke lineageRecorder and return response payload or None on failure."""
+    """lineageRecorder Lambda を同期呼び出しして記録要求を送る。
+
+    Args:
+        function_name: 入力値。
+        lineage_id: 入力値。
+        job_name: 入力値。
+        input_dataset: 入力値。
+        output_dataset: 入力値。
+        event_type: 入力値。
+        metadata: 入力値。
+        duration_ms: 入力値。
+        error_message: 入力値。
+        tenant_id: 対象テナントID。
+        lambda_client: 入力値。
+
+    Returns:
+        dict[str, Any] | None: 処理結果の辞書。
+
+    Notes:
+        FunctionError や ClientError 時はログ化して None を返し、主処理を継続する。
+    """
     tenant = tenant_id or os.environ.get("TENANT_ID", "unknown")
     payload: dict[str, Any] = {
         "lineage_id": lineage_id,

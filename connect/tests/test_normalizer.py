@@ -90,6 +90,57 @@ class TestNormalizeItem:
         assert "synced_at" in result
         assert result["sync_source"] == "delta_query"
 
+    def test_source_metadata_includes_link_and_external_recipients(self, load_fixture):
+        """source_metadata に A/B 判定用の最小証跡が入る"""
+        item = load_fixture("drive_item_file.json")
+        permissions = [
+            {
+                "id": "perm-org-edit",
+                "roles": ["write"],
+                "link": {
+                    "scope": "organization",
+                    "type": "edit",
+                    "webUrl": "https://contoso.sharepoint.com/:w:/r/org-edit",
+                },
+            },
+            {
+                "id": "perm-anon",
+                "roles": ["read"],
+                "link": {
+                    "scope": "anonymous",
+                    "type": "view",
+                    "webUrl": "https://contoso.sharepoint.com/:w:/g/anon-link",
+                },
+            },
+            {
+                "id": "perm-external",
+                "roles": ["write"],
+                "grantedToV2": {
+                    "user": {
+                        "id": "user-ext-1",
+                        "displayName": "External User",
+                        "email": "stayhungry.stayfoolish.1990@gmail.com",
+                        "userType": "guest",
+                    }
+                },
+            },
+        ]
+
+        result = normalize_item(
+            item,
+            permissions,
+            DRIVE_ID,
+            TENANT_ID,
+            tenant_domains=["contoso.com"],
+        )
+        source_metadata = json.loads(result["source_metadata"])
+
+        assert "stayhungry.stayfoolish.1990@gmail.com" in source_metadata["external_recipients"]
+        assert "https://contoso.sharepoint.com/:w:/r/org-edit" in source_metadata["org_edit_links"]
+        assert "https://contoso.sharepoint.com/:w:/g/anon-link" in source_metadata["anonymous_links"]
+        assert isinstance(source_metadata.get("permission_targets"), list)
+        assert source_metadata.get("tenant_domains") == ["contoso.com"]
+
     def test_folder_item(self):
         """フォルダアイテムの正規化"""
         item = {

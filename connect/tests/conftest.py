@@ -56,6 +56,7 @@ def env_setup(monkeypatch):
     monkeypatch.setenv("NOTIFICATION_TOPIC_ARN", TEST_TOPIC_ARN)
     monkeypatch.setenv("RAW_BUCKET", TEST_RAW_BUCKET)
     monkeypatch.setenv("TENANT_ID", TEST_TENANT_ID)
+    monkeypatch.setenv("CONNECT_CONNECTIONS_TABLE", "AIReadyConnect-Connections")
 
     # Config シングルトンをリセット
     import src.shared.config as config_mod

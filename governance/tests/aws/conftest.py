@@ -15,6 +15,7 @@ from typing import Any, Generator
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 
 # ─── AWS 環境定数 ───
 AWS_REGION = "ap-northeast-1"
@@ -27,28 +28,22 @@ CONNECT_TABLE_NAME = "AIReadyConnect-FileMetadata"
 SENSITIVITY_QUEUE_NAME = "AIReadyGov-SensitivityDetectionQueue"
 ANALYZE_DLQ_NAME = "AIReadyGov-analyzeExposure-DLQ"
 DETECT_DLQ_NAME = "AIReadyGov-detectSensitivity-DLQ"
-REPORT_BUCKET = f"aireadygov-reports-{AWS_ACCOUNT_ID}"
-RAW_PAYLOAD_BUCKET = f"aireadyconnect-raw-payload-{AWS_ACCOUNT_ID}"
-VECTORS_BUCKET = f"aiready-{AWS_ACCOUNT_ID}-vectors"
+RAW_PAYLOAD_BUCKET = "aireadyconnect-raw-payload"
+VECTORS_BUCKET = "aiready-vectors"
 ENTITY_RESOLUTION_QUEUE_PARAM = "/aiready/ontology/entity_resolution_queue_url"
 
 # ─── Lambda 関数名 ───
 ANALYZE_EXPOSURE_FN = "AIReadyGov-analyzeExposure"
 DETECT_SENSITIVITY_FN = "AIReadyGov-detectSensitivity"
-BATCH_SCORING_FN = "AIReadyGov-batchScoring"
-
-# ─── EventBridge ───
-BATCH_SCORING_RULE = "AIReadyGov-batchScoring-daily"
+REMEDIATE_FINDING_FN = "AIReadyGov-remediateFinding"
 
 # ─── SSM パラメータ ───
 SSM_PARAMETERS = {
-    "/aiready/governance/risk_score_threshold": "2.0",
     "/aiready/governance/max_exposure_score": "10.0",
     "/aiready/governance/permissions_count_threshold": "50",
     "/aiready/governance/rescan_interval_days": "7",
     "/aiready/governance/max_file_size_bytes": "52428800",
     "/aiready/governance/max_text_length": "500000",
-    "/aiready/governance/batch_scoring_hour_utc": "5",
 }
 
 # ─── テスト専用テナント ───
@@ -61,8 +56,8 @@ ALARM_NAMES = [
     "AIReadyGov-detectSensitivity-DLQ-NotEmpty",
     "AIReadyGov-analyzeExposure-ErrorRate-High",
     "AIReadyGov-detectSensitivity-ErrorRate-High",
-    "AIReadyGov-batchScoring-Duration-High",
 ]
+GOVERNANCE_DASHBOARD_NAME = "AIReadyGov-Operations"
 
 
 # ─── AWS クライアントファクトリ ───
@@ -151,7 +146,13 @@ def connect_table(dynamodb_resource):
 
 @pytest.fixture(scope="session")
 def sensitivity_queue_url(sqs_client) -> str:
-    resp = sqs_client.get_queue_url(QueueName=SENSITIVITY_QUEUE_NAME)
+    try:
+        resp = sqs_client.get_queue_url(QueueName=SENSITIVITY_QUEUE_NAME)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"AWS.SimpleQueueService.NonExistentQueue", "QueueDoesNotExist"}:
+            pytest.skip("SensitivityDetectionQueue is not deployed in hard-cut mode")
+        raise
     return resp["QueueUrl"]
 
 
@@ -163,7 +164,13 @@ def analyze_dlq_url(sqs_client) -> str:
 
 @pytest.fixture(scope="session")
 def detect_dlq_url(sqs_client) -> str:
-    resp = sqs_client.get_queue_url(QueueName=DETECT_DLQ_NAME)
+    try:
+        resp = sqs_client.get_queue_url(QueueName=DETECT_DLQ_NAME)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"AWS.SimpleQueueService.NonExistentQueue", "QueueDoesNotExist"}:
+            pytest.skip("detectSensitivity DLQ is not deployed in hard-cut mode")
+        raise
     return resp["QueueUrl"]
 
 
@@ -202,7 +209,7 @@ def make_file_metadata(
         # AIReadyConnect-FileMetadata の PK は drive_id のため必須
         drive_id = f"drive-{tenant_id}"
     if raw_s3_key is None:
-        raw_s3_key = f"raw/{tenant_id}/{item_id}/2026-02-23.json"
+        raw_s3_key = f"{tenant_id}/raw/{item_id}/2026-02-23.json"
     now = datetime.now(timezone.utc).isoformat()
     return {
         "tenant_id": tenant_id,
@@ -425,9 +432,7 @@ def cleanup_after_test(finding_table, document_analysis_table, connect_table, s3
         cleanup_findings(finding_table, tid)
         cleanup_document_analysis_items(document_analysis_table, tid)
         cleanup_connect_items(connect_table, tid)
-    cleanup_s3_prefix(s3_client, REPORT_BUCKET, f"{TEST_TENANT_ID}/")
-    cleanup_s3_prefix(s3_client, REPORT_BUCKET, f"{TEST_TENANT_ID_2}/")
-    cleanup_s3_prefix(s3_client, RAW_PAYLOAD_BUCKET, f"raw/{TEST_TENANT_ID}/")
-    cleanup_s3_prefix(s3_client, RAW_PAYLOAD_BUCKET, f"raw/{TEST_TENANT_ID_2}/")
-    cleanup_s3_prefix(s3_client, VECTORS_BUCKET, f"vectors/{TEST_TENANT_ID}/")
-    cleanup_s3_prefix(s3_client, VECTORS_BUCKET, f"vectors/{TEST_TENANT_ID_2}/")
+    cleanup_s3_prefix(s3_client, RAW_PAYLOAD_BUCKET, f"{TEST_TENANT_ID}/raw/")
+    cleanup_s3_prefix(s3_client, RAW_PAYLOAD_BUCKET, f"{TEST_TENANT_ID_2}/raw/")
+    cleanup_s3_prefix(s3_client, VECTORS_BUCKET, f"{TEST_TENANT_ID}/vectors/")
+    cleanup_s3_prefix(s3_client, VECTORS_BUCKET, f"{TEST_TENANT_ID_2}/vectors/")

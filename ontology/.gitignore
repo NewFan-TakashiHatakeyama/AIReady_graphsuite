@@ -1,0 +1,9 @@
+# CDK synth output (including variant directory names under ontology root)
+cdk.out*/
+cdk/cdk.out/
+
+# Lambda layer build tree (recreated by scripts/build_common_layer.ps1)
+layers/common-layer/build/
+
+# Local coverage
+.coverage

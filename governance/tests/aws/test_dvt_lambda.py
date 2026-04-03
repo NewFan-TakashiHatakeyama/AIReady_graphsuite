@@ -1,28 +1,28 @@
-"""DVT-2: Lambda 関数デプロイ検証テスト
+"""DVT-2: Lambda 関数デプロイ検証テスト。
 
-analyzeExposure / detectSensitivity / batchScoring の各 Lambda が
-設計通りの構成・トリガー・環境変数でデプロイされていることを実 AWS 環境で検証する。
+現行 hard-cut 後の契約に合わせ、active Lambda（analyze/remediate）と
+廃止済み detectSensitivity / batchScoring の非存在を実 AWS で検証する。
 """
 
 from __future__ import annotations
 
 import pytest
 
+from botocore.exceptions import ClientError
+
 from tests.aws.conftest import (
     ANALYZE_EXPOSURE_FN,
-    BATCH_SCORING_FN,
-    BATCH_SCORING_RULE,
     DETECT_SENSITIVITY_FN,
-    DOCUMENT_ANALYSIS_TABLE_NAME,
+    CONNECT_TABLE_NAME,
     FINDING_TABLE_NAME,
-    VECTORS_BUCKET,
+    REMEDIATE_FINDING_FN,
 )
 
 pytestmark = pytest.mark.aws
 
 
 class TestDVT2Lambda:
-    """DVT-2: Lambda 関数デプロイ検証（12 テストケース）"""
+    """DVT-2: Lambda 関数デプロイ検証（analyze / remediate と廃止 Lambda の非存在）"""
 
     # ── analyzeExposure ──────────────────────────────────
 
@@ -43,11 +43,12 @@ class TestDVT2Lambda:
         assert cfg["Timeout"] == 60
 
     def test_dvt_2_04_analyze_exposure_env_vars(self, lambda_client):
-        """FINDING_TABLE_NAME, SENSITIVITY_QUEUE_URL, LOG_LEVEL が設定済み"""
+        """Hard-cut後の analyzeExposure 必須 env が設定済み"""
         cfg = lambda_client.get_function(FunctionName=ANALYZE_EXPOSURE_FN)["Configuration"]
         env = cfg["Environment"]["Variables"]
         assert env["FINDING_TABLE_NAME"] == FINDING_TABLE_NAME
-        assert "SENSITIVITY_QUEUE_URL" in env
+        assert "POLICY_SCOPE_TABLE_NAME" in env
+        assert "RAW_PAYLOAD_BUCKET" in env
         assert "LOG_LEVEL" in env
 
     def test_dvt_2_05_analyze_exposure_event_source(self, lambda_client):
@@ -71,55 +72,61 @@ class TestDVT2Lambda:
     # ── detectSensitivity ────────────────────────────────
 
     def test_dvt_2_07_detect_sensitivity_exists(self, lambda_client):
-        """detectSensitivity が Docker Lambda（PackageType=Image）であること"""
-        resp = lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)
-        assert resp["Configuration"]["PackageType"] == "Image"
+        """detectSensitivity は hard-cut で廃止済み（関数が存在しない）。"""
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
     def test_dvt_2_08_detect_sensitivity_memory_timeout(self, lambda_client):
-        """メモリ 4096MB、タイムアウト 600 秒"""
-        cfg = lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)["Configuration"]
-        assert cfg["MemorySize"] == 4096
-        assert cfg["Timeout"] == 600
+        """detectSensitivity は hard-cut 後にリソース非存在。"""
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
     def test_dvt_2_09_detect_sensitivity_ephemeral(self, lambda_client):
-        """エフェメラルストレージ = 1024MB"""
-        cfg = lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)["Configuration"]
-        assert cfg["EphemeralStorage"]["Size"] == 1024
+        """detectSensitivity は hard-cut 後にリソース非存在。"""
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
-    def test_dvt_2_10_detect_sensitivity_env_vars_phase65(self, lambda_client):
-        """Phase 6.5 の環境変数が設定されていること"""
-        cfg = lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)["Configuration"]
-        env = cfg["Environment"]["Variables"]
-        assert env["DOCUMENT_ANALYSIS_TABLE_NAME"] == DOCUMENT_ANALYSIS_TABLE_NAME
-        assert env["VECTORS_BUCKET"] == VECTORS_BUCKET
-        assert "ENTITY_RESOLUTION_QUEUE_URL" in env
-        assert env.get("DOCUMENT_ANALYSIS_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+    def test_dvt_2_10_detect_sensitivity_env_vars_ontology_extensions(self, lambda_client):
+        """detectSensitivity は hard-cut 後にリソース非存在。"""
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
     def test_dvt_2_11_detect_sensitivity_sqs_trigger(self, lambda_client):
-        """SQS トリガー（BatchSize=1）が有効"""
-        resp = lambda_client.list_event_source_mappings(FunctionName=DETECT_SENSITIVITY_FN)
-        sqs_mappings = [
-            m for m in resp["EventSourceMappings"]
-            if "sqs" in m["EventSourceArn"]
-        ]
-        assert len(sqs_mappings) >= 1
+        """detectSensitivity は hard-cut 後に関数自体が存在しない。"""
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName=DETECT_SENSITIVITY_FN)
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
-        mapping = sqs_mappings[0]
-        assert mapping["State"] == "Enabled"
-        assert mapping["BatchSize"] == 1
+    # ── batchScoring（廃止）──────────────────────────────
 
-    # ── batchScoring ─────────────────────────────────────
+    def test_dvt_2_12_batch_scoring_removed(self, lambda_client):
+        """batchScoring Lambda は廃止済み（関数が存在しない）。"""
+        with pytest.raises(ClientError) as exc_info:
+            lambda_client.get_function(FunctionName="AIReadyGov-batchScoring")
+        assert exc_info.value.response["Error"]["Code"] == "ResourceNotFoundException"
 
-    def test_dvt_2_12_batch_scoring_exists(self, lambda_client):
-        """batchScoring Lambda が Active であること"""
-        resp = lambda_client.get_function(FunctionName=BATCH_SCORING_FN)
+    # ── remediateFinding ─────────────────────────────────
+
+    def test_dvt_2_14_remediate_finding_exists(self, lambda_client):
+        """remediateFinding Lambda が Active であること"""
+        resp = lambda_client.get_function(FunctionName=REMEDIATE_FINDING_FN)
         assert resp["Configuration"]["State"] == "Active"
 
-    def test_dvt_2_13_batch_scoring_eventbridge_rule(self, events_client):
-        """EventBridge ルール: 日次 05:00 UTC, ENABLED"""
-        resp = events_client.describe_rule(Name=BATCH_SCORING_RULE)
-        assert resp["State"] == "ENABLED"
-        assert resp["ScheduleExpression"] in {
-            "cron(0 5 * * ? *)",
-            "cron(0 5 ? * * *)",
-        }
+    def test_dvt_2_15_remediate_finding_runtime_and_limits(self, lambda_client):
+        """python3.12 / メモリ 512MB / タイムアウト 120 秒"""
+        cfg = lambda_client.get_function(FunctionName=REMEDIATE_FINDING_FN)["Configuration"]
+        assert cfg["Runtime"] == "python3.12"
+        assert cfg["MemorySize"] == 512
+        assert cfg["Timeout"] == 120
+
+    def test_dvt_2_16_remediate_finding_env_vars(self, lambda_client):
+        """Finding / Connect テーブル名が環境変数に設定されていること"""
+        cfg = lambda_client.get_function(FunctionName=REMEDIATE_FINDING_FN)["Configuration"]
+        env = cfg.get("Environment") or {}
+        variables = env.get("Variables") or {}
+        assert variables.get("FINDING_TABLE_NAME") == FINDING_TABLE_NAME
+        assert variables.get("CONNECT_TABLE_NAME") == CONNECT_TABLE_NAME

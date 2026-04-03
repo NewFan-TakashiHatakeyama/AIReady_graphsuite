@@ -17,11 +17,10 @@ from pathlib import Path
 import boto3
 
 AWS_REGION = "ap-northeast-1"
-AWS_ACCOUNT_ID = "565699611973"
 
 FINDING_TABLE_NAME = "AIReadyGov-ExposureFinding"
 CONNECT_TABLE_NAME = "AIReadyConnect-FileMetadata"
-RAW_PAYLOAD_BUCKET = f"aireadyconnect-raw-payload-{AWS_ACCOUNT_ID}"
+RAW_PAYLOAD_BUCKET = "aireadyconnect-raw-payload"
 
 TEST_TENANT_ID = "test-tenant-dvt-001"
 TEST_TENANT_ID_2 = "test-tenant-dvt-002"
@@ -63,7 +62,7 @@ def generate_file_metadata_records(connect_table, tenant_id: str, count: int = 1
                 "size": 2048000,
                 "modified_at": now,
                 "is_deleted": False,
-                "raw_s3_key": f"raw/{tenant_id}/{item_id}/2026-02-23.json",
+                "raw_s3_key": f"{tenant_id}/raw/{item_id}/2026-02-23.json",
             }
             batch.put_item(Item=record)
             items.append(record)
@@ -111,7 +110,7 @@ def upload_test_files(s3_client, tenant_id: str):
     }
 
     for filename, content in test_files.items():
-        key = f"raw/{tenant_id}/fixtures/{filename}"
+        key = f"{tenant_id}/raw/fixtures/{filename}"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET,
             Key=key,
@@ -122,7 +121,7 @@ def upload_test_files(s3_client, tenant_id: str):
 
     for fixture_file in FIXTURES_DIR.glob("*"):
         if fixture_file.is_file():
-            key = f"raw/{tenant_id}/fixtures/{fixture_file.name}"
+            key = f"{tenant_id}/raw/fixtures/{fixture_file.name}"
             s3_client.put_object(
                 Bucket=RAW_PAYLOAD_BUCKET,
                 Key=key,

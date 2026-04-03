@@ -1,9 +1,22 @@
 {
   "app": "python app.py",
   "context": {
+    "governanceOntologyFromContext": true,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws"],
-    "@aws-cdk/aws-iam:minimizePolicies": true
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "batch_scoring": {
+      "vpc_id": "vpc-0e1d533832fefc34a",
+      "private_subnet_ids": [
+        "subnet-08e4bddb58001f845",
+        "subnet-02e1d737a956818f8"
+      ],
+      "lambda_security_group_id": "sg-0b6142d3821046045"
+    },
+    "ontology": {
+      "report_bucket": "aiready-ontology-reports",
+      "report_prefix": "tenant-alpha/reports/"
+    }
   }
 }

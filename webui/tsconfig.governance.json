@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": [
+    "src/api/graphsuite.ts",
+    "src/features/governance/**/*.ts",
+    "src/features/governance/**/*.tsx",
+    "src/features/common/AuditWorkbench.tsx",
+    "src/features/common/EvidenceDialog.tsx",
+    "src/features/common/FeatureOnboardingPanel.tsx",
+    "src/features/common/HoverHelpLabel.tsx",
+    "src/features/common/TablePageControls.tsx",
+    "src/features/common/operationDeepLink.ts",
+    "src/lib/utils.ts",
+    "src/lib/governanceProtectionScore.ts",
+    "src/stores/settings.ts",
+    "src/stores/state.ts",
+    "src/vite-env.d.ts",
+    "e2e/**/*.ts"
+  ]
+}

@@ -14,5 +14,5 @@
     "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "size": 4096000,
     "is_deleted": false,
-    "raw_s3_key": "raw/test-tenant-dvt-001/PLACEHOLDER/2026-02-23.json"
+    "raw_s3_key": "test-tenant-dvt-001/raw/PLACEHOLDER/2026-02-23.json"
 }

@@ -12,6 +12,17 @@ NAMESPACE = "AIReadyGovernance"
 
 
 def _get_cw_client():
+    """CloudWatch クライアントを遅延初期化して返す。
+    
+    Args:
+        なし。
+    
+    Returns:
+        なし。
+    
+    Notes:
+        なし。
+    """
     global _cw_client
     if _cw_client is None:
         _cw_client = boto3.client("cloudwatch")
@@ -25,12 +36,18 @@ def emit_metric(
     dimensions: dict[str, str] | None = None,
 ) -> None:
     """CloudWatch にメトリクスを送信する。
-
+    
     Args:
-        metric_name: メトリクス名 (例: "AIReadyGov.FindingsCreated")
-        value: 値
-        unit: 単位 ("Count", "Milliseconds" 等)
-        dimensions: ディメンション (例: {"Lambda": "analyzeExposure", "TenantId": "t-001"})
+        metric_name: 引数。
+        value: 引数。
+        unit: 引数。
+        dimensions: 引数。
+    
+    Returns:
+        なし。
+    
+    Notes:
+        なし。
     """
     cw_dimensions = []
     if dimensions:
@@ -50,6 +67,7 @@ def emit_metric(
             ],
         )
     except Exception:
+        # メトリクス送信失敗で本処理を止めない。
         pass
 
 
@@ -58,7 +76,19 @@ def emit_count(
     count: int = 1,
     dimensions: dict[str, str] | None = None,
 ) -> None:
-    """カウントメトリクスの送信ショートカット。"""
+    """カウントメトリクスの送信ショートカット。
+    
+    Args:
+        metric_name: 引数。
+        count: 引数。
+        dimensions: 引数。
+    
+    Returns:
+        なし。
+    
+    Notes:
+        なし。
+    """
     emit_metric(metric_name, float(count), unit="Count", dimensions=dimensions)
 
 
@@ -67,5 +97,17 @@ def emit_duration(
     duration_ms: float,
     dimensions: dict[str, str] | None = None,
 ) -> None:
-    """ミリ秒メトリクスの送信ショートカット。"""
+    """ミリ秒メトリクスの送信ショートカット。
+    
+    Args:
+        metric_name: 引数。
+        duration_ms: 引数。
+        dimensions: 引数。
+    
+    Returns:
+        なし。
+    
+    Notes:
+        なし。
+    """
     emit_metric(metric_name, duration_ms, unit="Milliseconds", dimensions=dimensions)

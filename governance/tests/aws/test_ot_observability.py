@@ -13,10 +13,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 
 from tests.aws.conftest import (
-    ALARM_NAMES,
     ANALYZE_EXPOSURE_FN,
-    BATCH_SCORING_FN,
-    DETECT_SENSITIVITY_FN,
     RAW_PAYLOAD_BUCKET,
     TEST_TENANT_ID,
     invoke_lambda,
@@ -84,24 +81,21 @@ class TestOT1Observability:
         )
 
     def test_ot_1_02_detect_dlq_alarm_exists(self, cloudwatch_client):
-        """detectSensitivity DLQ アラームが存在し正しく設定されている。"""
+        """hard-cut 後は detectSensitivity DLQ アラームが存在しない。"""
         alarm_name = "AIReadyGov-detectSensitivity-DLQ-NotEmpty"
         resp = cloudwatch_client.describe_alarms(AlarmNames=[alarm_name])
         alarms = resp.get("MetricAlarms", [])
-        assert len(alarms) == 1, f"Alarm '{alarm_name}' not found"
-        alarm = alarms[0]
-        assert alarm["MetricName"] == "ApproximateNumberOfMessagesVisible"
+        assert len(alarms) == 0, f"Alarm '{alarm_name}' should be removed in hard-cut mode"
 
-    def test_ot_1_03_batch_duration_alarm_exists(self, cloudwatch_client):
-        """batchScoring Duration アラームの閾値が 840000ms であること。"""
-        alarm_name = "AIReadyGov-batchScoring-Duration-High"
-        resp = cloudwatch_client.describe_alarms(AlarmNames=[alarm_name])
-        alarms = resp.get("MetricAlarms", [])
-        assert len(alarms) == 1, f"Alarm '{alarm_name}' not found"
-        alarm = alarms[0]
-        assert alarm["Threshold"] == 840000, (
-            f"Expected threshold 840000, got {alarm['Threshold']}"
-        )
+    def test_ot_1_03_batch_alarms_removed(self, cloudwatch_client):
+        """batchScoring 廃止後は Duration/Errors アラームが存在しないこと。"""
+        for alarm_name in (
+            "AIReadyGov-batchScoring-Duration-High",
+            "AIReadyGov-batchScoring-Errors-Detected",
+        ):
+            resp = cloudwatch_client.describe_alarms(AlarmNames=[alarm_name])
+            alarms = resp.get("MetricAlarms", [])
+            assert len(alarms) == 0, f"Alarm '{alarm_name}' should be removed"
 
     @pytest.mark.slow
     def test_ot_1_04_findings_created_metric(
@@ -109,7 +103,7 @@ class TestOT1Observability:
     ):
         """FileMetadata 挿入後に AIReadyGov.FindingsCreated メトリクスが記録される。"""
         item_id = f"item-ot104-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+        raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
             Body=b"metric test findings created",
@@ -136,7 +130,7 @@ class TestOT1Observability:
     ):
         """PII 検出後に AIReadyGov.PIIDetected メトリクスが記録される。"""
         item_id = f"item-ot105-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
+        raw_key = f"{TEST_TENANT_ID}/raw/{item_id}/payload.txt"
         s3_client.put_object(
             Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
             Body="個人番号 1111 2222 3333".encode("utf-8"),
@@ -145,6 +139,9 @@ class TestOT1Observability:
             tenant_id=TEST_TENANT_ID, item_id=item_id,
             item_name="metric_pii.txt", mime_type="text/plain",
             raw_s3_key=raw_key,
+        )
+        metadata["source_metadata"] = json.dumps(
+            {"text": "個人番号 1111 2222 3333"}
         )
         connect_table.put_item(Item=metadata)
 
@@ -157,33 +154,6 @@ class TestOT1Observability:
 
         total = _sum_metric_values(cloudwatch_client, "AIReadyGov.PIIDetected", 60)
         assert total > 0, "PIIDetected metric not recorded in last 30 minutes"
-
-    def test_ot_1_06_batch_items_processed_metric(
-        self, connect_table, lambda_client, s3_client, cloudwatch_client
-    ):
-        """batchScoring 実行後に AIReadyGov.BatchItemsProcessed メトリクスが記録される。"""
-        item_id = f"item-ot106-{uuid.uuid4().hex[:8]}"
-        raw_key = f"raw/{TEST_TENANT_ID}/{item_id}/payload.txt"
-        s3_client.put_object(
-            Bucket=RAW_PAYLOAD_BUCKET, Key=raw_key,
-            Body=b"batch metric test",
-        )
-        metadata = make_file_metadata(
-            tenant_id=TEST_TENANT_ID, item_id=item_id,
-            item_name="metric_batch.txt", mime_type="text/plain",
-            raw_s3_key=raw_key,
-        )
-        connect_table.put_item(Item=metadata)
-
-        result = invoke_lambda(
-            lambda_client, BATCH_SCORING_FN, {"tenant_id": TEST_TENANT_ID}
-        )
-        assert result["error"] is None
-
-        time.sleep(60)
-
-        total = _sum_metric_values(cloudwatch_client, "AIReadyGov.BatchItemsProcessed", 60)
-        assert total > 0, "BatchItemsProcessed metric not recorded in last 30 minutes"
 
     def test_ot_1_07_structured_log_output(self, logs_client):
         """analyzeExposure のログが JSON 構造化出力であること。"""
@@ -267,8 +237,8 @@ class TestOT1Observability:
             pytest.skip(f"Log group {log_group} not found")
 
     def test_ot_1_09_detect_sensitivity_phase65_logs(self, logs_client):
-        """detectSensitivity のログに Phase 6.5 実行痕跡が出力される。"""
-        log_group = f"/aws/lambda/{DETECT_SENSITIVITY_FN}"
+        """hard-cut 後は detectSensitivity ロググループが存在しない。"""
+        log_group = "/aws/lambda/AIReadyGov-detectSensitivity"
         try:
             now_ms = int(time.time() * 1000)
             resp = logs_client.filter_log_events(
@@ -279,13 +249,6 @@ class TestOT1Observability:
                 limit=20,
             )
             events = resp.get("events", [])
-            if not events:
-                pytest.skip("No detectSensitivity completion logs found in last 60 minutes")
-
-            has_context = any(
-                "sensitivity_score" in e["message"] and "pii_detected" in e["message"]
-                for e in events
-            )
-            assert has_context, "detectSensitivity log is missing expected structured context"
+            assert len(events) == 0, "detectSensitivity logs should be absent in hard-cut mode"
         except logs_client.exceptions.ResourceNotFoundException:
-            pytest.skip(f"Log group {log_group} not found")
+            pass

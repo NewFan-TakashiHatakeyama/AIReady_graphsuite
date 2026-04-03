@@ -1,4 +1,8 @@
-"""Lineage event model."""
+"""LineageEventモデル定義。
+
+OpenLineage互換イベントを DynamoDB 永続化するための
+シリアライズ/デシリアライズ責務を持つ。
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,11 @@ from typing import Any
 
 @dataclass
 class LineageEvent:
-    """OpenLineage-compatible lineage event stored in DynamoDB."""
+    """DynamoDB に保存する系譜イベントの表現。
+
+    OpenLineage RunEvent を永続化しやすい形へ平坦化したモデルで、
+    `inputs` / `outputs` / `metadata` は DynamoDB 保存時に JSON 文字列化される。
+    """
 
     tenant_id: str
     lineage_id: str
@@ -27,6 +35,17 @@ class LineageEvent:
     ttl: int = 0
 
     def to_dynamodb_item(self) -> dict[str, Any]:
+        """LineageEvent を DynamoDB 保存形式へシリアライズする。
+
+        Args:
+            なし。
+
+        Returns:
+            dict[str, Any]: 処理結果の辞書。
+
+        Notes:
+            inputs/outputs/metadata は JSON 文字列へ変換して保存互換性を保つ。
+        """
         item = asdict(self)
         item["inputs"] = json.dumps(self.inputs, ensure_ascii=False)
         item["outputs"] = json.dumps(self.outputs, ensure_ascii=False)
@@ -35,6 +54,17 @@ class LineageEvent:
 
     @classmethod
     def from_dynamodb_item(cls, item: dict[str, Any]) -> "LineageEvent":
+        """DynamoDB Item から LineageEvent を復元する。
+
+        Args:
+            item: 対象アイテム。
+
+        Returns:
+            'LineageEvent': 処理結果。
+
+        Notes:
+            欠損フィールドには既定値を補完し、JSON 文字列列は型復元する。
+        """
         return cls(
             tenant_id=item["tenant_id"],
             lineage_id=item["lineage_id"],
@@ -54,6 +84,17 @@ class LineageEvent:
 
 
 def _load_list(value: Any) -> list[dict[str, Any]]:
+    """値を list[dict] として安全に復元する。
+
+    Args:
+        value: 変換対象値。
+
+    Returns:
+        list[dict[str, Any]]: 処理結果の一覧。
+
+    Notes:
+        文字列は JSON parse し、不正値は空配列にフォールバックする。
+    """
     if isinstance(value, str):
         return json.loads(value) if value else []
     if isinstance(value, list):
@@ -62,6 +103,17 @@ def _load_list(value: Any) -> list[dict[str, Any]]:
 
 
 def _load_dict(value: Any) -> dict[str, Any]:
+    """値を dict として安全に復元する。
+
+    Args:
+        value: 変換対象値。
+
+    Returns:
+        dict[str, Any]: 処理結果の辞書。
+
+    Notes:
+        文字列は JSON parse し、不正値は空辞書にフォールバックする。
+    """
     if isinstance(value, str):
         return json.loads(value) if value else {}
     if isinstance(value, dict):

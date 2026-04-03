@@ -11,12 +11,11 @@ import sys
 import boto3
 
 AWS_REGION = "ap-northeast-1"
-AWS_ACCOUNT_ID = "565699611973"
 
 FINDING_TABLE_NAME = "AIReadyGov-ExposureFinding"
 CONNECT_TABLE_NAME = "AIReadyConnect-FileMetadata"
-RAW_PAYLOAD_BUCKET = f"aireadyconnect-raw-payload-{AWS_ACCOUNT_ID}"
-REPORT_BUCKET = f"aireadygov-reports-{AWS_ACCOUNT_ID}"
+RAW_PAYLOAD_BUCKET = "aireadyconnect-raw-payload"
+VECTORS_BUCKET = "aiready-vectors"
 SENSITIVITY_QUEUE_NAME = "AIReadyGov-SensitivityDetectionQueue"
 
 TEST_TENANT_PREFIXES = ["test-tenant-dvt-"]
@@ -105,12 +104,10 @@ def main():
 
     print("\n--- S3: テストデータ削除 ---")
     for prefix in TEST_TENANT_PREFIXES:
-        for bucket in [RAW_PAYLOAD_BUCKET, REPORT_BUCKET]:
-            for sub in ["raw/", "reports/", ""]:
-                full_prefix = f"{sub}{prefix}" if sub else prefix
-                count = cleanup_s3_prefix(resources["s3"], bucket, full_prefix)
-                if count > 0:
-                    print(f"  s3://{bucket}/{full_prefix}* → {count} 件削除")
+        for bucket in [RAW_PAYLOAD_BUCKET, VECTORS_BUCKET]:
+            count = cleanup_s3_prefix(resources["s3"], bucket, prefix)
+            if count > 0:
+                print(f"  s3://{bucket}/{prefix}* → {count} 件削除")
 
     print("\n--- SQS: キューパージ ---")
     purge_sqs_queue(resources["sqs"], SENSITIVITY_QUEUE_NAME)

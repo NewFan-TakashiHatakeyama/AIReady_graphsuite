@@ -10,16 +10,27 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+TOKYO_TZ = ZoneInfo("Asia/Tokyo")
 
 
 class StructuredFormatter(logging.Formatter):
     """JSON 形式のログフォーマッター"""
 
     def format(self, record: logging.LogRecord) -> str:
+        """LogRecord を JSON 文字列へ整形する。
+
+        Args:
+            record: 整形対象のログレコード
+
+        Returns:
+            JSON 形式のログ文字列
+        """
         log_entry: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(TOKYO_TZ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -102,6 +113,9 @@ def log_with_context(
         event_id: イベント ID
         extra_data: 追加データ
         exc_info: 例外情報を含めるか
+
+    Returns:
+        なし
     """
     logger.log(
         level,

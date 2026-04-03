@@ -11,9 +11,33 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-from urllib.parse import parse_qs, unquote_plus, urlparse
+from urllib.parse import unquote_plus
 
 logger = logging.getLogger(__name__)
+
+
+def _merged_query_params(event: dict[str, Any]) -> dict[str, str]:
+    """ALB の queryStringParameters と multiValueQueryStringParameters を統合する。
+
+    同一キーが複数ある場合は先頭値を採用する。Graph 検証で multiValue のみ渡るケースに対応する。
+    """
+    merged: dict[str, str] = {}
+    single = event.get("queryStringParameters")
+    if isinstance(single, dict):
+        for key, value in single.items():
+            if value is not None and str(value).strip():
+                merged[key] = str(value)
+    multi = event.get("multiValueQueryStringParameters")
+    if isinstance(multi, dict):
+        for key, values in multi.items():
+            if key in merged:
+                continue
+            if not values:
+                continue
+            first = values[0]
+            if first is not None and str(first).strip():
+                merged[key] = str(first)
+    return merged
 
 
 def is_validation_request(event: dict[str, Any]) -> bool:
@@ -29,7 +53,7 @@ def is_validation_request(event: dict[str, Any]) -> bool:
     Returns:
         True: バリデーションリクエスト
     """
-    query = event.get("queryStringParameters") or {}
+    query = _merged_query_params(event)
     return "validationToken" in query
 
 
@@ -45,9 +69,15 @@ def get_validation_token(event: dict[str, Any]) -> str:
     Returns:
         URL デコード済み validationToken の値
     """
-    query = event.get("queryStringParameters") or {}
+    query = _merged_query_params(event)
     raw_token = query.get("validationToken", "")
     return unquote_plus(raw_token)
+
+
+def normalized_request_path(event: dict[str, Any]) -> str:
+    """ALB から渡る path が空文字のことがある。Graph 検証前の GET を 405 にしないため / とみなす。"""
+    raw = str(event.get("path") or "").strip()
+    return "/" if not raw else raw
 
 
 def is_health_check(event: dict[str, Any]) -> bool:
@@ -60,9 +90,9 @@ def is_health_check(event: dict[str, Any]) -> bool:
         True: ヘルスチェック
     """
     method = event.get("httpMethod", "").upper()
-    path = event.get("path", "/")
-    query = event.get("queryStringParameters") or {}
-    return method == "GET" and path == "/" and "validationToken" not in query
+    path = normalized_request_path(event)
+    merged = _merged_query_params(event)
+    return method == "GET" and path == "/" and "validationToken" not in merged
 
 
 def verify_client_state(
@@ -152,20 +182,49 @@ def extract_resource_info(notification: dict[str, Any]) -> dict[str, str]:
     """
     resource_data = notification.get("resourceData", {})
 
-    # resource フィールドから drive_id を抽出
-    # 例: "drives/b!USrprPl-yE6I8PBco0KG4sni6gP.../root"
-    resource = notification.get("resource", "")
+    resource = str(notification.get("resource", "") or "").strip()
     drive_id = ""
+    resource_type = "drive"
+    team_id = ""
+    channel_id = ""
+    chat_id = ""
+    message_id = ""
     if resource.startswith("drives/"):
         parts = resource.split("/")
         if len(parts) >= 2:
             drive_id = parts[1]
+    elif resource.startswith("teams/"):
+        resource_type = "message"
+        parts = resource.split("/")
+        if len(parts) >= 6 and parts[0] == "teams" and parts[2] == "channels":
+            team_id = parts[1]
+            channel_id = parts[3]
+            if parts[4] == "messages":
+                message_id = parts[5]
+    elif resource.startswith("chats/"):
+        resource_type = "message"
+        parts = resource.split("/")
+        if len(parts) >= 4 and parts[0] == "chats":
+            chat_id = parts[1]
+            if parts[2] == "messages":
+                message_id = parts[3]
+    else:
+        resource_type = "unknown"
+
+    item_id = str(resource_data.get("id") or "").strip()
+    if resource_type == "message" and not item_id and message_id:
+        item_id = message_id
 
     return {
         "subscription_id": notification.get("subscriptionId", ""),
         "change_type": notification.get("changeType", ""),
         "resource": resource,
+        "resource_type": resource_type,
         "drive_id": drive_id,
-        "item_id": resource_data.get("id", ""),
+        "item_id": item_id,
+        "team_id": team_id,
+        "channel_id": channel_id,
+        "chat_id": chat_id,
+        "message_id": message_id or item_id,
         "odata_type": resource_data.get("@odata.type", ""),
     }

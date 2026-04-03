@@ -12,15 +12,22 @@ from typing import Any
 import requests
 
 from src.shared.config import get_config
-from src.shared.ssm import get_param, put_param
+from src.shared.ssm import get_graph_credentials_scoped, put_param
 
 logger = logging.getLogger(__name__)
 
 
 class GraphApiError(Exception):
-    """Graph API 呼び出しエラー"""
+    """Graph API 呼び出し失敗を表す例外。"""
 
     def __init__(self, status_code: int, message: str, response_body: Any = None):
+        """GraphApiError を初期化する。
+
+        Args:
+            status_code: HTTP ステータスコード
+            message: エラー概要
+            response_body: 可能であれば API レスポンス本文
+        """
         self.status_code = status_code
         self.response_body = response_body
         super().__init__(f"Graph API error {status_code}: {message}")
@@ -41,6 +48,17 @@ class GraphClient:
         client_secret: str | None = None,
         access_token: str | None = None,
     ):
+        """GraphClient を初期化する。
+
+        通常は `from_ssm` を経由して生成し、認証情報を明示的に渡すのは
+        テストや特殊用途に限定する想定。
+
+        Args:
+            client_id: Azure AD アプリケーション ID
+            tenant_id: Azure AD テナント ID
+            client_secret: アプリケーションシークレット
+            access_token: 既存アクセストークン
+        """
         cfg = get_config()
         self._cfg = cfg
         self._client_id = client_id
@@ -51,14 +69,30 @@ class GraphClient:
         self._session.headers.update({"Accept": "application/json"})
 
     @classmethod
-    def from_ssm(cls) -> GraphClient:
-        """SSM Parameter Store から認証情報を読み込んで初期化"""
+    def from_ssm(cls, *, tenant_id: str | None = None, connection_id: str | None = None) -> GraphClient:
+        """SSM Parameter Store から認証情報を読み込んで初期化する。
+
+        tenant/connection スコープを優先し、未設定時は互換キーへフォールバックする。
+
+        Args:
+            tenant_id: テナント識別子
+            connection_id: 接続識別子
+
+        Returns:
+            初期化済み GraphClient
+        """
         cfg = get_config()
+        normalized_tenant_id = str(tenant_id or cfg.tenant_id).strip()
+        normalized_connection_id = str(connection_id or "").strip()
+        credentials = get_graph_credentials_scoped(
+            tenant_id=normalized_tenant_id,
+            connection_id=normalized_connection_id,
+        )
         client = cls(
-            client_id=get_param(cfg.ssm_client_id, decrypt=False),
-            tenant_id=get_param(cfg.ssm_tenant_id, decrypt=False),
-            client_secret=get_param(cfg.ssm_client_secret),
-            access_token=get_param(cfg.ssm_access_token),
+            client_id=credentials.get("client_id"),
+            tenant_id=credentials.get("tenant_id"),
+            client_secret=credentials.get("client_secret"),
+            access_token=credentials.get("access_token"),
         )
         return client
 
@@ -97,15 +131,42 @@ class GraphClient:
         self._access_token = data["access_token"]
         return self._access_token
 
-    def refresh_and_store_token(self) -> str:
+    def refresh_and_store_token(self, *, tenant_id: str | None = None, connection_id: str | None = None) -> str:
         """トークンを更新し SSM Parameter Store に保存する
+
+        Args:
+            tenant_id: 保存先のテナント識別子
+            connection_id: 保存先の接続識別子
 
         Returns:
             新しいアクセストークン
         """
         token = self.get_access_token()
         cfg = self._cfg
-        put_param(cfg.ssm_access_token, token, param_type="SecureString")
+        normalized_tenant_id = str(tenant_id or cfg.tenant_id).strip()
+        normalized_connection_id = str(connection_id or "").strip()
+        if normalized_tenant_id and normalized_connection_id:
+            put_param(
+                f"/aiready/connect/{normalized_tenant_id}/{normalized_connection_id}/access_token",
+                token,
+                param_type="SecureString",
+            )
+            put_param(
+                f"/aiready/connect/{normalized_tenant_id}/access_token",
+                token,
+                param_type="SecureString",
+            )
+        if normalized_tenant_id and not normalized_connection_id:
+            put_param(
+                f"/aiready/connect/{normalized_tenant_id}/access_token",
+                token,
+                param_type="SecureString",
+            )
+        if not normalized_tenant_id:
+            put_param(cfg.ssm_access_token, token, param_type="SecureString")
+        else:
+            # Compatibility path for legacy handlers still reading global key.
+            put_param(cfg.ssm_access_token, token, param_type="SecureString")
         logger.info("Access token refreshed and stored in SSM")
         return token
 
@@ -114,7 +175,11 @@ class GraphClient:
     # ==========================================
 
     def _auth_headers(self) -> dict[str, str]:
-        """Authorization ヘッダーを返す"""
+        """Authorization ヘッダーを返す。
+
+        Returns:
+            Bearer トークン付きヘッダー
+        """
         return {"Authorization": f"Bearer {self._access_token}"}
 
     def _request(
@@ -126,7 +191,22 @@ class GraphClient:
         json_body: dict[str, Any] | None = None,
         timeout: int | None = None,
     ) -> requests.Response:
-        """リトライ・429 ハンドリング付き HTTP リクエスト"""
+        """リトライ・429 ハンドリング付き HTTP リクエストを実行する。
+
+        Args:
+            method: HTTP メソッド
+            url: リクエスト先 URL
+            params: クエリパラメータ
+            json_body: JSON ボディ
+            timeout: タイムアウト秒
+
+        Returns:
+            HTTP レスポンス
+
+        Raises:
+            GraphApiError: API 応答が失敗扱いの場合
+            requests.exceptions.Timeout: リトライ上限後もタイムアウトした場合
+        """
         cfg = self._cfg
         timeout = timeout or cfg.graph_api_timeout
         max_retries = cfg.graph_api_max_retries
@@ -143,7 +223,7 @@ class GraphClient:
                     timeout=timeout,
                 )
 
-                # 成功
+                # 2xx/3xx は成功としてそのまま返す。
                 if resp.status_code < 400:
                     return resp
 
@@ -174,7 +254,7 @@ class GraphClient:
                     time.sleep(wait)
                     continue
 
-                # それ以外のエラー
+                # 上記以外の 4xx は再試行せず呼び出し側へ例外を返す。
                 raise GraphApiError(
                     resp.status_code,
                     resp.text[:500],
@@ -195,23 +275,58 @@ class GraphClient:
     def get(
         self, url: str, *, params: dict[str, str] | None = None, timeout: int | None = None
     ) -> requests.Response:
-        """GET リクエスト"""
+        """GET リクエストを実行する。
+
+        Args:
+            url: リクエスト先 URL
+            params: クエリパラメータ
+            timeout: タイムアウト秒
+
+        Returns:
+            HTTP レスポンス
+        """
         return self._request("GET", url, params=params, timeout=timeout)
 
     def post(
         self, url: str, *, json_body: dict[str, Any] | None = None, timeout: int | None = None
     ) -> requests.Response:
-        """POST リクエスト"""
+        """POST リクエストを実行する。
+
+        Args:
+            url: リクエスト先 URL
+            json_body: JSON ボディ
+            timeout: タイムアウト秒
+
+        Returns:
+            HTTP レスポンス
+        """
         return self._request("POST", url, json_body=json_body, timeout=timeout)
 
     def patch(
         self, url: str, *, json_body: dict[str, Any] | None = None, timeout: int | None = None
     ) -> requests.Response:
-        """PATCH リクエスト"""
+        """PATCH リクエストを実行する。
+
+        Args:
+            url: リクエスト先 URL
+            json_body: JSON ボディ
+            timeout: タイムアウト秒
+
+        Returns:
+            HTTP レスポンス
+        """
         return self._request("PATCH", url, json_body=json_body, timeout=timeout)
 
     def delete(self, url: str, *, timeout: int | None = None) -> requests.Response:
-        """DELETE リクエスト"""
+        """DELETE リクエストを実行する。
+
+        Args:
+            url: リクエスト先 URL
+            timeout: タイムアウト秒
+
+        Returns:
+            HTTP レスポンス
+        """
         return self._request("DELETE", url, timeout=timeout)
 
     # ==========================================
@@ -239,6 +354,16 @@ class GraphClient:
         resp = self.get(url, params=params, timeout=timeout)
         return resp.json()
 
+    def graph_get_absolute(
+        self,
+        absolute_url: str,
+        *,
+        timeout: int | None = None,
+    ) -> dict[str, Any]:
+        """@odata.nextLink など Graph が返す絶対 URL へ GET する。"""
+        resp = self.get(absolute_url, timeout=timeout)
+        return resp.json()
+
     def graph_post(
         self,
         path: str,
@@ -246,7 +371,16 @@ class GraphClient:
         json_body: dict[str, Any] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
-        """Graph API v1.0 に POST リクエストし、JSON を返す"""
+        """Graph API v1.0 に POST リクエストし、JSON を返す。
+
+        Args:
+            path: API パス
+            json_body: JSON ボディ
+            timeout: タイムアウト秒
+
+        Returns:
+            JSON レスポンス dict
+        """
         url = f"{self._cfg.graph_base_url}{path}"
         resp = self.post(url, json_body=json_body, timeout=timeout)
         return resp.json()
@@ -258,7 +392,16 @@ class GraphClient:
         json_body: dict[str, Any] | None = None,
         timeout: int | None = None,
     ) -> dict[str, Any]:
-        """Graph API v1.0 に PATCH リクエストし、JSON を返す"""
+        """Graph API v1.0 に PATCH リクエストし、JSON を返す。
+
+        Args:
+            path: API パス
+            json_body: JSON ボディ
+            timeout: タイムアウト秒
+
+        Returns:
+            JSON レスポンス dict
+        """
         url = f"{self._cfg.graph_base_url}{path}"
         resp = self.patch(url, json_body=json_body, timeout=timeout)
         return resp.json()

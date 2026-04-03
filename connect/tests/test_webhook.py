@@ -65,6 +65,16 @@ class TestIsValidationRequest:
         }
         assert is_validation_request(event) is False
 
+    def test_post_validation_token_in_multi_value_only(self):
+        """multiValueQueryStringParameters のみに validationToken（ALB 互換）"""
+        event = {
+            "httpMethod": "POST",
+            "path": "/",
+            "queryStringParameters": None,
+            "multiValueQueryStringParameters": {"validationToken": ["from-multi"]},
+        }
+        assert is_validation_request(event) is True
+
 
 # ── get_validation_token ──
 
@@ -93,6 +103,13 @@ class TestGetValidationToken:
         event = {"queryStringParameters": None}
         assert get_validation_token(event) == ""
 
+    def test_token_from_multi_value_only(self):
+        event = {
+            "queryStringParameters": None,
+            "multiValueQueryStringParameters": {"validationToken": ["abc%2Bdef"]},
+        }
+        assert get_validation_token(event) == "abc+def"
+
 
 # ── is_health_check ──
 
@@ -105,6 +122,15 @@ class TestIsHealthCheck:
         event = {
             "httpMethod": "GET",
             "path": "/",
+            "queryStringParameters": {},
+        }
+        assert is_health_check(event) is True
+
+    def test_get_empty_path_is_health(self):
+        """ALB が path を空文字で渡す GET をヘルスとみなす（Graph 検証以外のプローブで 405 にしない）"""
+        event = {
+            "httpMethod": "GET",
+            "path": "",
             "queryStringParameters": {},
         }
         assert is_health_check(event) is True
@@ -219,6 +245,7 @@ class TestExtractResourceInfo:
 
         assert info["subscription_id"] == "sub-001"
         assert info["change_type"] == "updated"
+        assert info["resource_type"] == "drive"
         assert info["drive_id"] == "b!test-drive-id-12345"
         assert info["item_id"] == "ITEM001_FILE"
         assert info["resource"] == "drives/b!test-drive-id-12345/root"
@@ -228,5 +255,32 @@ class TestExtractResourceInfo:
         info = extract_resource_info({})
         assert info["subscription_id"] == ""
         assert info["change_type"] == ""
+        assert info["resource_type"] == "unknown"
         assert info["drive_id"] == ""
         assert info["item_id"] == ""
+
+    def test_teams_channel_message_notification(self):
+        notification = {
+            "subscriptionId": "sub-msg-1",
+            "changeType": "created",
+            "resource": "teams/team-1/channels/channel-1/messages/170000",
+            "resourceData": {"id": "170000"},
+        }
+        info = extract_resource_info(notification)
+        assert info["resource_type"] == "message"
+        assert info["team_id"] == "team-1"
+        assert info["channel_id"] == "channel-1"
+        assert info["message_id"] == "170000"
+        assert info["item_id"] == "170000"
+
+    def test_chat_message_notification(self):
+        notification = {
+            "subscriptionId": "sub-msg-2",
+            "changeType": "updated",
+            "resource": "chats/19:chat-id@thread.v2/messages/180000",
+            "resourceData": {"id": "180000"},
+        }
+        info = extract_resource_info(notification)
+        assert info["resource_type"] == "message"
+        assert info["chat_id"] == "19:chat-id@thread.v2"
+        assert info["message_id"] == "180000"

@@ -1,4 +1,4 @@
-"""T-015: Config dataclass — 環境変数を属性として参照可能にする
+"""T-015: 設定管理 dataclass
 
 Lambda 環境変数や SSM パラメータ名を一元管理する。
 """
@@ -7,6 +7,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+
+
+def _default_chat_backfill_max() -> int:
+    raw = os.getenv("CONNECT_CHAT_BACKFILL_MAX_MESSAGES", "500") or "500"
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return 500
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,11 @@ class Config:
             "FILE_METADATA_TABLE", "AIReadyConnect-FileMetadata"
         )
     )
+    message_metadata_table: str = field(
+        default_factory=lambda: os.getenv(
+            "MESSAGE_METADATA_TABLE", "AIReadyConnect-MessageMetadata"
+        )
+    )
     idempotency_table: str = field(
         default_factory=lambda: os.getenv(
             "IDEMPOTENCY_TABLE", "AIReadyConnect-IdempotencyKeys"
@@ -34,6 +47,9 @@ class Config:
         default_factory=lambda: os.getenv(
             "DELTA_TOKENS_TABLE", "AIReadyConnect-DeltaTokens"
         )
+    )
+    connections_table: str = field(
+        default_factory=lambda: os.getenv("CONNECT_CONNECTIONS_TABLE", "")
     )
     notification_topic_arn: str = field(
         default_factory=lambda: os.getenv("NOTIFICATION_TOPIC_ARN", "")
@@ -77,8 +93,19 @@ class Config:
     # ── 冪等 TTL (秒) ──
     idempotency_ttl_seconds: int = 7 * 24 * 60 * 60  # 7 days
 
+    # ── チャット履歴バックフィル（Lambda backfill_chat_messages） ──
+    # 0 = 無制限（非推奨）。正の整数で最大取得件数を上限する。
+    chat_backfill_max_messages: int = field(default_factory=_default_chat_backfill_max)
+
     def graph_token_url(self, azure_tenant_id: str) -> str:
-        """Azure AD テナント ID を埋め込んだトークンエンドポイントを返す"""
+        """Azure AD テナント ID を埋め込んだトークンエンドポイントを返す。
+
+        Args:
+            azure_tenant_id: Azure AD テナント ID
+
+        Returns:
+            トークンエンドポイント URL
+        """
         return self.graph_token_url_template.format(tenant_id=azure_tenant_id)
 
 
@@ -87,7 +114,11 @@ _config: Config | None = None
 
 
 def get_config() -> Config:
-    """Config のシングルトンインスタンスを取得"""
+    """Config のシングルトンインスタンスを取得する。
+
+    Returns:
+        共通設定インスタンス
+    """
     global _config
     if _config is None:
         _config = Config()

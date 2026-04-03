@@ -8,7 +8,6 @@ from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
-from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sns_subscriptions as sns_subscriptions
 from aws_cdk import aws_sqs as sqs
@@ -16,22 +15,32 @@ from constructs import Construct
 
 
 class OntologyStack(Stack):
+    @staticmethod
+    def _resolve_layer_asset_path(layer_root: Path) -> str:
+        build_path = layer_root / "build"
+        zip_path = layer_root / f"{layer_root.name}.zip"
+        if build_path.exists():
+            return str(build_path)
+        if zip_path.exists():
+            return str(zip_path)
+        raise ValueError(
+            f"Layer asset is missing under '{layer_root}'. "
+            "Run scripts/build_common_layer.ps1 before cdk diff/deploy."
+        )
+
     def __init__(
         self,
         scope: Construct,
         construct_id: str,
         tenant_id: str,
-        aurora_secret_arn: str,
-        aurora_proxy_endpoint: str,
-        aurora_db_name: str = "ai_ready_ontology",
-        aurora_username: str = "ontology_app",
         alert_email: str | None = None,
+        shared_vpc_id: str | None = None,
         vpc: Optional[ec2.IVpc] = None,
         lambda_security_group: Optional[ec2.ISecurityGroup] = None,
         connect_file_metadata_table_name: str | None = None,
         connect_file_metadata_stream_arn: str | None = None,
         governance_finding_table_name: str = "AIReadyGov-ExposureFinding",
-        document_analysis_table_name: str = "AIReady-DocumentAnalysis",
+        document_analysis_table_name: str = "AIReadyGov-DocumentAnalysis",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -44,10 +53,19 @@ class OntologyStack(Stack):
         self.connect_file_metadata_stream_arn = connect_file_metadata_stream_arn
         self.governance_finding_table_name = governance_finding_table_name
         self.document_analysis_table_name = document_analysis_table_name
-        self.aurora_secret_arn = aurora_secret_arn
-        self.aurora_proxy_endpoint = aurora_proxy_endpoint
-        self.aurora_db_name = aurora_db_name
-        self.aurora_username = aurora_username
+        self.shared_vpc_id = shared_vpc_id
+        if self.vpc is None:
+            self.vpc = self._resolve_vpc(shared_vpc_id=shared_vpc_id)
+        if self.lambda_security_group is None:
+            self.lambda_security_group = ec2.SecurityGroup(
+                self,
+                "OntologyLambdaSecurityGroup",
+                vpc=self.vpc,
+                allow_all_outbound=True,
+                description="Security group for Ontology Lambda functions",
+            )
+        self.alert_topic_arn: str | None = None
+        self.profile_update_function_name: str | None = None
 
         unified_metadata_table = dynamodb.Table(
             self,
@@ -144,6 +162,31 @@ class OntologyStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             time_to_live_attribute="ttl",
         )
+        entity_master_projection_table = dynamodb.Table(
+            self,
+            "EntityMasterProjectionTable",
+            table_name="AIReadyOntology-EntityMaster",
+            partition_key=dynamodb.Attribute(
+                name="tenant_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="entity_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True
+            ),
+        )
+        entity_master_projection_table.add_global_secondary_index(
+            index_name="GSI-EntityTypeUpdatedAt",
+            partition_key=dynamodb.Attribute(
+                name="entity_type", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="updated_at", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
 
         entity_resolution_dlq = sqs.Queue(
             self,
@@ -167,26 +210,6 @@ class OntologyStack(Stack):
             ),
         )
 
-        report_bucket = s3.Bucket(
-            self,
-            "OntologyReportBucket",
-            bucket_name=f"aiready-ontology-reports-{self.tenant_id}".lower(),
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            versioned=False,
-            lifecycle_rules=[
-                s3.LifecycleRule(
-                    transitions=[
-                        s3.Transition(
-                            storage_class=s3.StorageClass.GLACIER,
-                            transition_after=Duration.days(90),
-                        )
-                    ],
-                    expiration=Duration.days(365),
-                )
-            ],
-        )
-
         alert_topic = sns.Topic(
             self,
             "OntologyAlertTopic",
@@ -201,11 +224,11 @@ class OntologyStack(Stack):
         lambda_roles = self._create_lambda_roles(
             unified_metadata_table=unified_metadata_table,
             lineage_event_table=lineage_event_table,
-            report_bucket=report_bucket,
             entity_resolution_queue=entity_resolution_queue,
+            entity_master_projection_table=entity_master_projection_table,
             alert_topic=alert_topic,
-            aurora_secret_arn=aurora_secret_arn,
         )
+        common_layer = self._create_common_layer()
         self._create_phase3_lambdas(
             unified_metadata_table=unified_metadata_table,
             lineage_event_table=lineage_event_table,
@@ -216,22 +239,29 @@ class OntologyStack(Stack):
             entity_resolution_queue=entity_resolution_queue,
             entity_resolver_role=lambda_roles["entity_resolver"],
             alert_topic=alert_topic,
+            common_layer=common_layer,
+            entity_master_projection_table=entity_master_projection_table,
         )
+        self._create_profile_update_lambda(
+            profile_update_role=lambda_roles["profile_update"],
+            common_layer=common_layer,
+            unified_metadata_table=unified_metadata_table,
+        )
+        self.alert_topic_arn = alert_topic.topic_arn
 
     def _create_lambda_roles(
         self,
         *,
         unified_metadata_table: dynamodb.Table,
         lineage_event_table: dynamodb.Table,
-        report_bucket: s3.Bucket,
         entity_resolution_queue: sqs.Queue,
+        entity_master_projection_table: dynamodb.Table,
         alert_topic: sns.Topic,
-        aurora_secret_arn: str,
     ) -> dict[str, iam.Role]:
         schema_transform_role = self._base_lambda_role("SchemaTransformRole")
         lineage_recorder_role = self._base_lambda_role("LineageRecorderRole")
         entity_resolver_role = self._base_lambda_role("EntityResolverRole")
-        batch_reconciler_role = self._base_lambda_role("BatchReconcilerRole")
+        profile_update_role = self._base_lambda_role("ProfileUpdateRole")
 
         unified_metadata_table.grant_read_write_data(schema_transform_role)
         schema_transform_role.add_to_policy(
@@ -239,6 +269,7 @@ class OntologyStack(Stack):
                 actions=["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"],
                 resources=[
                     f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.governance_finding_table_name}",
+                    f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.governance_finding_table_name}/index/*",
                     f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.document_analysis_table_name}",
                     f"arn:aws:dynamodb:{self.region}:{self.account}:table/FileMetadata-*",
                     f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.connect_file_metadata_table_name}",
@@ -269,18 +300,13 @@ class OntologyStack(Stack):
         lineage_event_table.grant_read_write_data(lineage_recorder_role)
 
         entity_resolution_queue.grant_consume_messages(entity_resolver_role)
+        entity_master_projection_table.grant_read_write_data(entity_resolver_role)
         entity_resolver_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan"],
                 resources=[
                     f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.document_analysis_table_name}"
                 ],
-            )
-        )
-        entity_resolver_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["secretsmanager:GetSecretValue"],
-                resources=[aurora_secret_arn],
             )
         )
         alert_topic.grant_publish(entity_resolver_role)
@@ -293,38 +319,11 @@ class OntologyStack(Stack):
             )
         )
 
-        unified_metadata_table.grant_read_write_data(batch_reconciler_role)
-        report_bucket.grant_put(batch_reconciler_role)
-        batch_reconciler_role.add_to_policy(
+        unified_metadata_table.grant_read_write_data(profile_update_role)
+        profile_update_role.add_to_policy(
             iam.PolicyStatement(
-                actions=[
-                    "dynamodb:GetItem",
-                    "dynamodb:Query",
-                    "dynamodb:Scan",
-                ],
-                resources=[
-                    f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.document_analysis_table_name}",
-                    f"arn:aws:dynamodb:{self.region}:{self.account}:table/FileMetadata-*",
-                    f"arn:aws:dynamodb:{self.region}:{self.account}:table/{self.connect_file_metadata_table_name}",
-                ],
-            )
-        )
-        batch_reconciler_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["secretsmanager:GetSecretValue"],
-                resources=[aurora_secret_arn],
-            )
-        )
-        batch_reconciler_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=[
-                    "states:StartExecution",
-                    "states:DescribeExecution",
-                    "states:StopExecution",
-                ],
-                resources=[
-                    f"arn:aws:states:{self.region}:{self.account}:stateMachine:*"
-                ],
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
             )
         )
 
@@ -332,7 +331,7 @@ class OntologyStack(Stack):
             "schema_transform": schema_transform_role,
             "lineage_recorder": lineage_recorder_role,
             "entity_resolver": entity_resolver_role,
-            "batch_reconciler": batch_reconciler_role,
+            "profile_update": profile_update_role,
         }
 
     def _create_phase3_lambdas(
@@ -410,6 +409,7 @@ class OntologyStack(Stack):
                 "UNIFIED_METADATA_TABLE": unified_metadata_table.table_name,
                 "GOVERNANCE_FINDING_TABLE": self.governance_finding_table_name,
                 "DOCUMENT_ANALYSIS_TABLE": self.document_analysis_table_name,
+                "ONTOLOGY_TARGET_EXTENSIONS": ".doc,.docx,.xls,.xlsx,.xlsm,.ppt,.pptx,.pdf,.txt,.md,.csv,.rtf",
                 "LINEAGE_FUNCTION_NAME": lineage_recorder.function_name,
                 "TENANT_ID": self.tenant_id,
             },
@@ -433,6 +433,8 @@ class OntologyStack(Stack):
         entity_resolution_queue: sqs.Queue,
         entity_resolver_role: iam.Role,
         alert_topic: sns.Topic,
+        common_layer: lambda_.LayerVersion,
+        entity_master_projection_table: dynamodb.Table,
     ) -> None:
         if not self.vpc:
             raise ValueError("VPC is required to create Ontology Lambda functions.")
@@ -460,27 +462,6 @@ class OntologyStack(Stack):
             ],
         )
 
-        common_layer = lambda_.LayerVersion(
-            self,
-            "CommonLayer",
-            layer_version_name="AIReadyOntology-common-layer",
-            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
-            code=lambda_.Code.from_asset(
-                str(Path(__file__).resolve().parents[2] / "layers" / "common-layer" / "build")
-            ),
-            description="Common dependencies layer (openlineage, utils)",
-        )
-        aurora_layer = lambda_.LayerVersion(
-            self,
-            "AuroraLayer",
-            layer_version_name="AIReadyOntology-aurora-layer",
-            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
-            code=lambda_.Code.from_asset(
-                str(Path(__file__).resolve().parents[2] / "layers" / "aurora-layer" / "build")
-            ),
-            description="Aurora dependencies layer (psycopg2)",
-        )
-
         entity_resolver = lambda_.Function(
             self,
             "EntityResolverLambda",
@@ -497,17 +478,13 @@ class OntologyStack(Stack):
             vpc_subnets=ec2.SubnetSelection(
                 subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
             ),
-            layers=[common_layer, aurora_layer],
+            layers=[common_layer],
             environment={
-                "AURORA_PROXY_ENDPOINT": self.aurora_proxy_endpoint,
-                "AURORA_PORT": "5432",
-                "AURORA_DB_NAME": self.aurora_db_name,
-                "AURORA_USERNAME": self.aurora_username,
-                "AURORA_SECRET_ARN": self.aurora_secret_arn,
                 "PII_ENCRYPTION_KEY_PARAM": "/ai-ready/ontology/{tenant_id}/pii-encryption-key",
                 "ALERT_TOPIC_ARN": alert_topic.topic_arn,
                 "LINEAGE_FUNCTION_NAME": "AIReadyOntology-lineageRecorder",
                 "DOCUMENT_ANALYSIS_TABLE": self.document_analysis_table_name,
+                "ENTITY_MASTER_TABLE": entity_master_projection_table.table_name,
                 "TENANT_ID": self.tenant_id,
             },
         )
@@ -519,6 +496,100 @@ class OntologyStack(Stack):
             event_source_arn=entity_resolution_queue.queue_arn,
             batch_size=1,
             enabled=True,
+            function_response_types=["ReportBatchItemFailures"],
+        )
+
+    def _create_common_layer(self) -> lambda_.LayerVersion:
+        return lambda_.LayerVersion(
+            self,
+            "CommonLayer",
+            layer_version_name="AIReadyOntology-common-layer",
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
+            code=lambda_.Code.from_asset(
+                self._resolve_layer_asset_path(
+                    Path(__file__).resolve().parents[2] / "layers" / "common-layer"
+                )
+            ),
+            description="Common dependencies layer (openlineage, utils)",
+        )
+
+    def _create_profile_update_lambda(
+        self,
+        *,
+        profile_update_role: iam.Role,
+        common_layer: lambda_.LayerVersion,
+        unified_metadata_table: dynamodb.Table,
+    ) -> None:
+        if not self.vpc:
+            raise ValueError("VPC is required to create Ontology Lambda functions.")
+        if not self.lambda_security_group:
+            raise ValueError(
+                "lambda_security_group is required to create Ontology Lambda functions."
+            )
+
+        code_asset_path = str(Path(__file__).resolve().parents[2])
+        lambda_code = lambda_.Code.from_asset(
+            code_asset_path,
+            exclude=[
+                "cdk.out",
+                "cdk.out/**",
+                "cdk.out*",
+                "cdk.out*/**",
+                "cdk.out.t022",
+                "cdk.out.t022/**",
+                ".git",
+                ".git/**",
+                ".pytest_cache",
+                ".pytest_cache/**",
+                "**/__pycache__",
+                "**/__pycache__/**",
+            ],
+        )
+
+        profile_update = lambda_.Function(
+            self,
+            "ProfileUpdateLambda",
+            function_name="AIReadyOntology-profileUpdate",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="src.handlers.profile_update.handler",
+            code=lambda_code,
+            memory_size=512,
+            timeout=Duration.seconds(120),
+            role=profile_update_role,
+            vpc=self.vpc,
+            security_groups=[self.lambda_security_group],
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            layers=[common_layer],
+            environment={
+                "UNIFIED_METADATA_TABLE": unified_metadata_table.table_name,
+                "TENANT_ID": self.tenant_id,
+            },
+        )
+
+        self.profile_update_function_name = profile_update.function_name
+
+    def _resolve_vpc(self, *, shared_vpc_id: str | None) -> ec2.IVpc:
+        if shared_vpc_id:
+            return ec2.Vpc.from_lookup(self, "SharedVpc", vpc_id=shared_vpc_id)
+        return ec2.Vpc(
+            self,
+            "OntologyVpc",
+            max_azs=2,
+            nat_gateways=1,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24,
+                ),
+                ec2.SubnetConfiguration(
+                    name="private",
+                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    cidr_mask=24,
+                ),
+            ],
         )
 
     def _base_lambda_role(self, role_id: str) -> iam.Role:
