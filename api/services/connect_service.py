@@ -28,6 +28,7 @@ from services.aws_clients import (
     get_secretsmanager_client,
     get_ssm_client,
 )
+from services.connect_customer_credentials import try_resolve_customer_graph_credentials_for_tenant
 from services.connect_settings import load_connect_settings
 from services.connect_settings import validate_connect_tenant_access
 from services.repositories.connect_logs_repository import ConnectLogsRepository
@@ -35,6 +36,7 @@ from services.repositories.connect_connections_repository import (
     ConnectConnectionsRepository,
 )
 from services.runtime_config import load_aws_runtime_config
+from services.governance_repository import close_governance_findings_for_connect_drive
 from domain.connect.value_objects import ConnectTenantConfig
 
 logger = logging.getLogger(__name__)
@@ -459,10 +461,6 @@ def _tenant_param_name(tenant_id: str, key: str) -> str:
     return f"/aiready/connect/{tenant_id}/{key}"
 
 
-def _tenant_connection_param_name(tenant_id: str, connection_id: str, key: str) -> str:
-    return f"/aiready/connect/{tenant_id}/{connection_id}/{key}"
-
-
 def _normalize_ssm_parameter_value(value: str | None) -> str:
     """Strip whitespace and invisible / format characters so PutParameter never gets an empty Value."""
     s = str(value if value is not None else "").strip()
@@ -693,14 +691,59 @@ def _build_site_search_tokens(source_type: str, query: str) -> list[str]:
     return deduped or ["site"]
 
 
+def _get_connect_client_secret_from_secrets_manager(tenant_id: str, connection_id: str) -> str:
+    tid = str(tenant_id or "").strip()
+    cid = str(connection_id or "").strip()
+    if not tid or not cid:
+        return ""
+    secret_id = f"/aiready/connect/{tid}/{cid}/client_secret"
+    try:
+        resp = _secretsmanager_client_resource().get_secret_value(SecretId=secret_id)
+    except ClientError:
+        return ""
+    raw = str(resp.get("SecretString") or "").strip()
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    return str(payload.get("client_secret") or "").strip()
+
+
 def _resolve_graph_credentials(
     tenant_id: str,
     *,
     azure_tenant_id: str = "",
     client_id: str = "",
     client_secret: str = "",
+    connection_id: str = "",
 ) -> tuple[str, str, str]:
+    tid = str(tenant_id or "").strip()
+    hybrid = try_resolve_customer_graph_credentials_for_tenant(tid)
+    if hybrid:
+        return hybrid
+
     candidate_azure_tenant = str(azure_tenant_id or "").strip()
+    candidate_client_id = str(client_id or "").strip()
+    candidate_client_secret = str(client_secret or "").strip()
+    conn_id = str(connection_id or "").strip()
+    row: dict[str, Any] | None = None
+    if conn_id:
+        try:
+            row = _connect_connections_repository.get_connection(tenant_id=tid, connection_id=conn_id)
+        except Exception:
+            row = None
+    if row:
+        if not _is_uuid_like(candidate_azure_tenant):
+            g = str(row.get("graph_tenant_id") or "").strip()
+            if _is_uuid_like(g):
+                candidate_azure_tenant = g
+        if not candidate_client_id:
+            candidate_client_id = str(row.get("graph_client_id") or "").strip()
+    if not candidate_client_secret and conn_id:
+        candidate_client_secret = _get_connect_client_secret_from_secrets_manager(tid, conn_id)
+
     tenant_scoped_azure = _get_ssm_value(_tenant_param_name(tenant_id, "tenant_id"))
     if not _is_uuid_like(candidate_azure_tenant):
         if _is_uuid_like(tenant_scoped_azure):
@@ -711,12 +754,12 @@ def _resolve_graph_credentials(
                 or _first_env_value("MS_GRAPH_TENANT_ID", "MSGraphTenantId")
             )
 
-    resolved_client_id = str(client_id or "").strip() or _get_ssm_value(
+    resolved_client_id = candidate_client_id or _get_ssm_value(
         _tenant_param_name(tenant_id, "client_id")
     ) or _get_ssm_value("MSGraphClientId") or _first_env_value(
         "MS_GRAPH_CLIENT_ID", "MSGraphClientId"
     )
-    resolved_client_secret = str(client_secret or "").strip() or _get_ssm_value(
+    resolved_client_secret = candidate_client_secret or _get_ssm_value(
         _tenant_param_name(tenant_id, "client_secret"), with_decryption=True
     ) or _get_ssm_value(
         "MSGraphClientSecret", with_decryption=True
@@ -1186,11 +1229,6 @@ def list_connect_subscriptions(tenant_id: str) -> dict[str, Any]:
         resource_path = str(connection.get("resource_path") or "").strip()
         target_type = str(connection.get("target_type") or "").strip() or None
         subscription_id = str(connection.get("subscription_id") or "").strip()
-        if not subscription_id and connection_id:
-            ssm_subscription_id = _get_ssm_value(
-                _tenant_connection_param_name(tenant_id, connection_id, "subscription_id")
-            )
-            subscription_id = str(ssm_subscription_id or "").strip()
         connection_status = str(connection.get("status") or "").strip().lower()
         if connection_status in {"deprecated", "retired", "deleted"}:
             continue
@@ -1274,6 +1312,58 @@ def _active_drive_ids_for_tenant(tenant_id: str) -> set[str]:
         if drive_id:
             active_drive_ids.add(drive_id)
     return active_drive_ids
+
+
+def get_active_connect_drive_ids(tenant_id: str) -> set[str]:
+    """アクティブ接続に紐づく drive_id の集合（Governance 一覧のスコープ絞り込み用）。"""
+    _require_connect_tenant(tenant_id)
+    return set(_active_drive_ids_for_tenant(tenant_id))
+
+
+def collect_file_metadata_item_ids_for_drives(
+    tenant_id: str,
+    drive_ids: set[str],
+    *,
+    max_per_drive: int = 12000,
+    max_total: int = 80000,
+) -> set[str]:
+    """各 drive の FileMetadata から item_id を収集する（件数上限付き）。"""
+    _require_connect_tenant(tenant_id)
+    normalized_drives = {str(d or "").strip() for d in drive_ids if str(d or "").strip()}
+    if not normalized_drives:
+        return set()
+    per_cap = max(1, min(int(max_per_drive), 50_000))
+    total_cap = max(1, min(int(max_total), 200_000))
+    file_table = _connect_table(_connect_settings.file_metadata_table_name)
+    out: set[str] = set()
+    for drive_id in sorted(normalized_drives):
+        if len(out) >= total_cap:
+            break
+        per_drive_added = 0
+        last_key = None
+        while per_drive_added < per_cap and len(out) < total_cap:
+            qkwargs: dict[str, Any] = {
+                "KeyConditionExpression": Key("drive_id").eq(drive_id),
+                "ProjectionExpression": "item_id",
+                "Limit": 200,
+            }
+            if last_key:
+                qkwargs["ExclusiveStartKey"] = last_key
+            try:
+                response = file_table.query(**qkwargs)
+            except ClientError:
+                break
+            for item in response.get("Items", []):
+                iid = str(item.get("item_id") or "").strip()
+                if iid:
+                    out.add(iid)
+                    per_drive_added += 1
+                    if len(out) >= total_cap or per_drive_added >= per_cap:
+                        break
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+    return out
 
 
 def _latest_active_connection_for_tenant(tenant_id: str) -> dict[str, Any] | None:
@@ -1368,22 +1458,29 @@ def _delete_idempotency_keys_for_tenant(tenant_id: str) -> int:
     return deleted_count
 
 
-def _cascade_delete_connect_artifacts(
+def _invoke_connect_cleanup_artifacts_lambda(
     *,
     tenant_id: str,
-    drive_id: str,
-) -> dict[str, int]:
+    drive_id: str = "",
+    connection_id: str = "",
+    purge_idempotency: bool = False,
+) -> dict[str, Any]:
+    """Invoke AIReadyConnect-cleanupConnectionArtifacts (sync)."""
     function_name = (
         os.getenv("CONNECT_CLEANUP_ARTIFACTS_LAMBDA_NAME")
         or "AIReadyConnect-cleanupConnectionArtifacts"
     ).strip()
+    payload: dict[str, Any] = {"tenant_id": tenant_id}
+    if str(drive_id or "").strip():
+        payload["drive_id"] = str(drive_id or "").strip()
+    if str(connection_id or "").strip():
+        payload["connection_id"] = str(connection_id or "").strip()
+    if purge_idempotency:
+        payload["purge_idempotency"] = True
     response = _lambda_client_resource().invoke(
         FunctionName=function_name,
         InvocationType="RequestResponse",
-        Payload=json.dumps(
-            {"tenant_id": tenant_id, "drive_id": drive_id},
-            ensure_ascii=True,
-        ).encode("utf-8"),
+        Payload=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
     )
     status_code = int(response.get("StatusCode", 500))
     if status_code < 200 or status_code >= 300:
@@ -1404,7 +1501,40 @@ def _cascade_delete_connect_artifacts(
         "file_metadata_deleted": int(body.get("file_metadata_deleted", 0) or 0),
         "delta_tokens_deleted": int(body.get("delta_tokens_deleted", 0) or 0),
         "idempotency_keys_deleted": int(body.get("idempotency_keys_deleted", 0) or 0),
+        "ssm_parameters_deleted": int(body.get("ssm_parameters_deleted", 0) or 0),
+        "client_secret_secret_deleted": bool(body.get("client_secret_secret_deleted", False)),
     }
+
+
+def _cascade_delete_connect_artifacts(
+    *,
+    tenant_id: str,
+    drive_id: str,
+    connection_id: str = "",
+) -> dict[str, Any]:
+    return _invoke_connect_cleanup_artifacts_lambda(
+        tenant_id=tenant_id,
+        drive_id=drive_id,
+        connection_id=connection_id,
+        purge_idempotency=True,
+    )
+
+
+def _cleanup_connect_connection_ssm_best_effort(*, tenant_id: str, connection_id: str) -> None:
+    """Remove connection-scoped SSM + SM secret after soft delete; failures are logged only."""
+    try:
+        _invoke_connect_cleanup_artifacts_lambda(
+            tenant_id=tenant_id,
+            drive_id="",
+            connection_id=connection_id,
+        )
+    except Exception:
+        logger.warning(
+            "Connect cleanup (SSM/SM only) failed after soft delete tenant_id=%s connection_id=%s",
+            tenant_id,
+            connection_id,
+            exc_info=True,
+        )
 
 
 def _trigger_initial_sync_check_after_onboarding(
@@ -1572,58 +1702,23 @@ def create_connect_onboarding(
         _tenant_param_name(config.tenant_id, "active_connection_id"), connection_id
     )
 
-    # Connection-scoped parameters (new path)
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "tenant_id"),
-        resolved_azure_tenant_id,
-    )
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "client_id"),
-        config.client_id,
-    )
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "site_id"),
-        config.site_id,
-    )
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "drive_id"),
-        config.drive_id,
-    )
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "notification_url"),
-        config.notification_url,
-    )
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "resource_type"),
-        normalized_resource_type,
-    )
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "resource_path"),
-        normalized_resource_path,
-    )
-    if config.client_state:
-        _put_ssm_parameter(
-            _tenant_connection_param_name(config.tenant_id, connection_id, "client_state"),
-            config.client_state,
-            secure=True,
-        )
-
     secret_name = f"/aiready/connect/{config.tenant_id}/{connection_id}/client_secret"
     try:
         _upsert_secret(secret_name, config.client_secret)
     except ClientError:
         pass
-    # Keep SSM secure param as compatibility source for all paths.
-    _put_ssm_parameter(
-        _tenant_connection_param_name(config.tenant_id, connection_id, "client_secret"),
-        config.client_secret,
-        secure=True,
-    )
     _put_ssm_parameter(
         _tenant_param_name(config.tenant_id, "client_secret"),
         config.client_secret,
         secure=True,
     )
+
+    _graph_connection_kw: dict[str, Any] = {
+        "graph_tenant_id": resolved_azure_tenant_id,
+        "graph_client_id": config.client_id,
+        "notification_url": config.notification_url,
+        "client_state": config.client_state,
+    }
 
     try:
         _connect_connections_repository.upsert_connection(
@@ -1639,6 +1734,7 @@ def create_connect_onboarding(
             team_id=normalized_team_id,
             channel_id=normalized_channel_id,
             chat_id=normalized_chat_id,
+            **_graph_connection_kw,
         )
     except Exception:
         logger.error(
@@ -1674,10 +1770,6 @@ def create_connect_onboarding(
         bootstrap_error = bootstrap_error or "subscription_id is missing from init subscription response."
     bootstrap_status_for_initial_sync = init_status
     if subscription_id:
-        _put_ssm_parameter(
-            _tenant_connection_param_name(config.tenant_id, connection_id, "subscription_id"),
-            subscription_id,
-        )
         _put_ssm_parameter(_tenant_param_name(config.tenant_id, "subscription_id"), subscription_id)
     try:
         _connect_connections_repository.upsert_connection(
@@ -1694,6 +1786,7 @@ def create_connect_onboarding(
             team_id=normalized_team_id,
             channel_id=normalized_channel_id,
             chat_id=normalized_chat_id,
+            **_graph_connection_kw,
         )
     except Exception:
         logger.error(
@@ -1860,7 +1953,10 @@ def delete_connect_subscription(
     graph_unsubscribe_failed = False
     if target_subscription_id and not _is_placeholder_subscription(target_subscription_id):
         try:
-            resolved_azure_tenant_id, resolved_client_id, resolved_client_secret = _resolve_graph_credentials(tenant_id)
+            resolved_azure_tenant_id, resolved_client_id, resolved_client_secret = _resolve_graph_credentials(
+                tenant_id,
+                connection_id=target_connection_id,
+            )
             access_token = _graph_access_token(
                 azure_tenant_id=resolved_azure_tenant_id,
                 client_id=resolved_client_id,
@@ -1881,12 +1977,46 @@ def delete_connect_subscription(
         )
 
     target_drive_id = str(target_connection.get("drive_id") or "").strip()
+    drive_id_from_connection = bool(target_drive_id)
+    if not target_drive_id:
+        # Legacy / partial rows: drive_id may be missing while FileMetadata still has items.
+        target_drive_id = str(_latest_drive_for_tenant(tenant_id) or "").strip()
+    if target_drive_id and not drive_id_from_connection:
+        logger.info(
+            "Connect disconnect: using FileMetadata-derived drive_id for governance close "
+            "tenant_id=%s connection_id=%s drive_id=%s",
+            tenant_id,
+            target_connection_id,
+            target_drive_id,
+        )
     deleted_at = _now().isoformat()
     status = "deleted"
+    governance_close_summary: dict[str, int] | None = None
+    if target_drive_id:
+        try:
+            governance_close_summary = close_governance_findings_for_connect_drive(
+                resolver_tenant_id=tenant_id,
+                drive_id=target_drive_id,
+                file_metadata_table=_connect_table(_connect_settings.file_metadata_table_name),
+            )
+            logger.info(
+                "Governance findings closed on connect disconnect tenant_id=%s drive_id=%s summary=%s",
+                tenant_id,
+                target_drive_id,
+                governance_close_summary,
+            )
+        except Exception:
+            logger.warning(
+                "Governance findings close on connect disconnect failed (non-fatal) tenant_id=%s drive_id=%s",
+                tenant_id,
+                target_drive_id,
+                exc_info=True,
+            )
     if normalized_delete_mode == "force":
         _cascade_delete_connect_artifacts(
             tenant_id=tenant_id,
             drive_id=target_drive_id,
+            connection_id=target_connection_id,
         )
         deleted = _connect_connections_repository.delete_connection(
             tenant_id=tenant_id,
@@ -1903,10 +2033,31 @@ def delete_connect_subscription(
         )
         status = str(updated.get("status") or "deleted")
         deleted_at = str(updated.get("updated_at") or deleted_at)
+        _cleanup_connect_connection_ssm_best_effort(
+            tenant_id=tenant_id,
+            connection_id=target_connection_id,
+        )
 
     _invalidate_cached_reads(
         tenant_id=tenant_id,
         namespaces=("overview", "subscriptions", "scopes", "events", "jobs", "audit"),
+    )
+
+    _drive_source = (
+        "connection"
+        if drive_id_from_connection
+        else ("filemetadata" if target_drive_id else "none")
+    )
+    logger.info(
+        "Connect delete completed tenant_id=%s connection_id=%s delete_mode=%s "
+        "drive_source=%s drive_id=%s graph_unsubscribe=%s governance_findings_close=%s",
+        tenant_id,
+        target_connection_id,
+        normalized_delete_mode,
+        _drive_source,
+        target_drive_id or "",
+        graph_unsubscribe_status,
+        governance_close_summary,
     )
 
     return {
@@ -1917,6 +2068,7 @@ def delete_connect_subscription(
         "status": status,
         "graph_unsubscribe_status": graph_unsubscribe_status,
         "deleted_at": deleted_at,
+        "governance_findings_close": governance_close_summary,
     }
 
 

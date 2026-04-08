@@ -11,6 +11,26 @@ export type OntologyPageKey =
 
 export type RemediationState = 'ai_proposed' | 'pending_approval' | 'approved' | 'executed'
 
+/** GET /ontology/overview の pillar_document_counts に対応（件数ベースの情報整備指標） */
+export interface OntologyPillarDocumentCounts {
+  denominator: number
+  freshness: {
+    byStatus: { active: number; aging: number; stale: number; other: number }
+    staleOrAging: number
+  }
+  duplication: {
+    inDuplicateGroup: number
+    nonCanonicalDuplicateCopy: number
+    canonicalOrNoDuplicateGroup: number
+  }
+  stewardship: {
+    meaningfulOwner: number
+    meaningfulProject: number
+    meaningfulTopicCategories: number
+    allThree: number
+  }
+}
+
 export interface OntologyOverviewStats {
   aiProposedCount: number
   approvedCount: number
@@ -50,6 +70,10 @@ export interface OntologyOverviewStats {
   freshnessFit?: number
   benchmarkLite?: number
   intentBreakdown?: Array<{ intentId: string; label: string; score: number }>
+  /** 件数ベース（API pillar_document_counts）。未返却時は undefined */
+  pillarDocumentCounts?: OntologyPillarDocumentCounts
+  /** API の情報整備スコア算出方式 */
+  ontologyScoreMode?: 'count_based' | 'legacy'
 }
 
 export interface UnifiedMetadataRecord {

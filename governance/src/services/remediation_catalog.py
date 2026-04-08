@@ -112,6 +112,29 @@ def _is_removable_permission(permission: dict[str, Any], owner_user_id: str) -> 
     return True
 
 
+def _is_sharing_link_org_or_anonymous(permission: dict[str, Any]) -> bool:
+    """True when permission represents an anyone or organization sharing link facet."""
+    return _permission_link_scope(permission) in {"anonymous", "organization"}
+
+
+def _is_removable_sharing_link_for_graph(permission: dict[str, Any], owner_user_id: str) -> bool:
+    """Whether this permission id should be proposed for Graph DELETE.
+
+    Item-level sharing links are revoked via DELETE /permissions/{{id}} even when Graph
+    populates `inheritedFrom` on nested items; excluding all inherited rows made
+    org-wide link remediation a no-op. Site-default and owner rows stay non-removable.
+    """
+    if not _permission_id(permission):
+        return False
+    if _is_owner_permission(permission, owner_user_id):
+        return False
+    if _is_site_default_permission(permission):
+        return False
+    if _is_sharing_link_org_or_anonymous(permission):
+        return True
+    return _is_removable_permission(permission, owner_user_id)
+
+
 def _is_external_permission(permission: dict[str, Any]) -> bool:
     for user in _iter_permission_users(permission):
         user_type = str(user.get("userType") or "").strip().lower()
@@ -157,6 +180,11 @@ def _infer_vectors_from_permissions(
             vectors.add("public_link")
         if _permission_link_scope(permission) == "organization":
             vectors.add("org_link")
+            link_obj = permission.get("link") if isinstance(permission.get("link"), dict) else {}
+            if str(link_obj.get("type") or "").strip().lower() == "edit":
+                vectors.add("org_link_editable")
+            elif _permission_roles(permission) & {"write", "edit"}:
+                vectors.add("org_link_editable")
         if _is_external_permission(permission):
             vectors.add("guest")
         if _is_removable_permission(permission, owner_user_id):
@@ -260,7 +288,7 @@ def build_m365_action_plan(
         ]
         if permission_id
         and _permission_link_scope(permission) in {"anonymous", "organization"}
-        and _is_removable_permission(permission, owner_user_id)
+        and _is_removable_sharing_link_for_graph(permission, owner_user_id)
     ]
     external_permission_ids = [
         permission_id
@@ -301,8 +329,16 @@ def build_m365_action_plan(
         if permission_id and not _is_removable_permission(permission, owner_user_id)
     ]
 
+    _wide_link_vectors = {
+        "public_link",
+        "org_link",
+        "org_link_view",
+        "org_link_edit",
+        "org_link_editable",
+        "all_users",
+    }
     actions: list[RemediationAction] = []
-    if vectors & {"public_link", "org_link", "org_link_view", "org_link_edit", "all_users"} or guards & {"G2", "G3"}:
+    if vectors & _wide_link_vectors or guards & {"G2", "G3"}:
         if link_permission_ids:
             actions.append(
                 RemediationAction(
@@ -370,7 +406,9 @@ def build_m365_action_plan(
         )
 
     if expected_audience in {"owner_only", "department_only"}:
-        broad_vectors = vectors.intersection({"public_link", "all_users", "org_link", "org_link_view", "org_link_edit"})
+        broad_vectors = vectors.intersection(
+            {"public_link", "all_users", "org_link", "org_link_view", "org_link_edit", "org_link_editable"}
+        )
         if broad_vectors and link_permission_ids:
             actions.insert(
                 0,
@@ -460,6 +498,65 @@ def build_m365_action_plan(
                 executable=False,
             )
         ]
+
+    # Low-confidence gate replaces the plan with owner_review; restore executable Graph
+    # removals when policy explicitly allows approval/auto + remove_permissions.
+    restored_executable: list[RemediationAction] = []
+    _policy_mode = remediation_mode.strip().lower()
+    _policy_action = remediation_action.strip().lower()
+    if _policy_mode in {"approval", "auto"} and _policy_action == "remove_permissions":
+        _ext_vec = {
+            "external_domain_share",
+            "external_email_direct_share",
+            "guest_direct_share",
+            "external_domain",
+            "guest",
+        }
+        if (
+            vectors
+            & {
+                "public_link",
+                "org_link",
+                "org_link_view",
+                "org_link_edit",
+                "org_link_editable",
+                "all_users",
+            }
+            or guards & {"G2", "G3"}
+        ) and link_permission_ids:
+            restored_executable.append(
+                RemediationAction(
+                    action_type="remove_permissions",
+                    title="共有リンク権限の遮断",
+                    reason="公開・組織リンク由来の露出を遮断する（低信頼度ゲート後の Graph 実行可能プラン復元）",
+                    permission_ids=list(link_permission_ids),
+                    executable=True,
+                )
+            )
+        if vectors.intersection(_ext_vec) and external_permission_ids:
+            restored_executable.append(
+                RemediationAction(
+                    action_type="remove_permissions",
+                    title="外部共有権限の遮断",
+                    reason="外部ゲスト・外部ドメイン共有を解除する（低信頼度ゲート後の Graph 実行可能プラン復元）",
+                    permission_ids=list(external_permission_ids),
+                    executable=True,
+                )
+            )
+        if "excessive_permissions" in vectors:
+            _excess_ids = writable_non_owner_ids or non_owner_ids
+            if _excess_ids:
+                restored_executable.append(
+                    RemediationAction(
+                        action_type="remove_permissions",
+                        title="過剰権限の縮退",
+                        reason="非所有者権限を整理して最小権限化する（低信頼度ゲート後の Graph 実行可能プラン復元）",
+                        permission_ids=_excess_ids,
+                        executable=True,
+                    )
+                )
+    if restored_executable:
+        actions = restored_executable
 
     if categories & {"executive_confidential", "security_incident"}:
         requested_mode = remediation_mode.strip().lower()

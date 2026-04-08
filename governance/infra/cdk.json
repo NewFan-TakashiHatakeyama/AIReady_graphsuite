@@ -1,6 +1,7 @@
 {
   "app": "python app.py",
   "context": {
+    "graphsuite_api_role_arn": "arn:aws:iam::565699611973:role/graphsuite-control-plane-task-prod",
     "governanceOntologyFromContext": true,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,

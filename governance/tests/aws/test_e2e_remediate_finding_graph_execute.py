@@ -141,4 +141,4 @@ class TestE2ERemediateFindingGraphExecute:
             Key={"tenant_id": e2e_tenant_id, "finding_id": e2e_finding_id}
         ).get("Item")
         assert updated is not None
-        assert str(updated.get("status", "")).strip().lower() == "completed"
+        assert str(updated.get("status", "")).strip().lower() == "in_progress"

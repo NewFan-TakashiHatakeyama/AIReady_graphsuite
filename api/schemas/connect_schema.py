@@ -37,6 +37,12 @@ class ConnectSubscriptionsResponse(BaseModel):
     pagination: PaginationDto
 
 
+class GovernanceFindingsCloseSummaryDto(BaseModel):
+    file_metadata_rows: int
+    findings_closed: int
+    findings_attempted: int
+
+
 class ConnectSubscriptionDeleteResponse(BaseModel):
     tenant_id: str
     connection_id: str
@@ -45,6 +51,7 @@ class ConnectSubscriptionDeleteResponse(BaseModel):
     status: str
     graph_unsubscribe_status: str
     deleted_at: str
+    governance_findings_close: GovernanceFindingsCloseSummaryDto | None = None
 
 
 class ConnectScopeDto(BaseModel):

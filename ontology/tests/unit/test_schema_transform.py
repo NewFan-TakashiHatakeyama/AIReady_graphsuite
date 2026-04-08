@@ -233,7 +233,8 @@ def test_ut_st_007_no_finding_defaults(monkeypatch) -> None:
     assert ("tenant-1", "item-1") in unified.items
 
 
-def test_ut_st_008_finding_error_uses_defaults_then_skips_closed(monkeypatch) -> None:
+def test_ut_st_008_finding_error_uses_defaults_closed_low_still_ingests_docx(monkeypatch) -> None:
+    """Finding 取得失敗時は DEFAULT（closed/low）へ。closed+low はカタログ適格のため取り込める。"""
     unified, _, _, _ = _setup(monkeypatch)
     monkeypatch.setattr(
         schema_transform,
@@ -244,7 +245,7 @@ def test_ut_st_008_finding_error_uses_defaults_then_skips_closed(monkeypatch) ->
         {"Records": [_stream_record(new_image=_default_new_image())]},
         None,
     )
-    assert ("tenant-1", "item-1") not in unified.items
+    assert ("tenant-1", "item-1") in unified.items
 
 
 def test_ut_st_009_risk_critical_forces_ai_ineligible(monkeypatch) -> None:
@@ -340,7 +341,8 @@ def test_ut_st_012_png_is_excluded_even_when_risk_low(monkeypatch) -> None:
     assert ("tenant-1", "item-1") not in unified.items
 
 
-def test_ut_st_013_closed_finding_skips_ontology_ingest(monkeypatch) -> None:
+def test_ut_st_013_closed_low_finding_allows_ontology_ingest(monkeypatch) -> None:
+    """closed かつ低リスクは is_eligible_finding_status_for_ontology で適格（カタログ用途）。"""
     unified, _, _, _ = _setup(monkeypatch)
     monkeypatch.setattr(
         schema_transform,
@@ -351,4 +353,34 @@ def test_ut_st_013_closed_finding_skips_ontology_ingest(monkeypatch) -> None:
         {"Records": [_stream_record(new_image=_default_new_image())]},
         None,
     )
-    assert ("tenant-1", "item-1") not in unified.items
+    assert ("tenant-1", "item-1") in unified.items
+
+
+def test_ut_st_014_completed_low_finding_allows_ontology_ingest(monkeypatch) -> None:
+    """是正完了後の completed + low はカタログに upsert される。"""
+    unified, _, _, _ = _setup(monkeypatch)
+    monkeypatch.setattr(
+        schema_transform,
+        "lookup_governance_finding",
+        lambda **kwargs: _governance_low(status="completed"),
+    )
+    schema_transform.handler(
+        {"Records": [_stream_record(new_image=_default_new_image())]},
+        None,
+    )
+    assert ("tenant-1", "item-1") in unified.items
+
+
+def test_ut_st_015_in_progress_low_finding_allows_ontology_ingest(monkeypatch) -> None:
+    """再スコア済み in_progress + low はストリーム競合時も取り込み可能にする。"""
+    unified, _, _, _ = _setup(monkeypatch)
+    monkeypatch.setattr(
+        schema_transform,
+        "lookup_governance_finding",
+        lambda **kwargs: _governance_low(status="in_progress"),
+    )
+    schema_transform.handler(
+        {"Records": [_stream_record(new_image=_default_new_image())]},
+        None,
+    )
+    assert ("tenant-1", "item-1") in unified.items

@@ -1,0 +1,130 @@
+<mxfile host="app.diagrams.net" agent="AIReady_graphsuite" version="24.7.17" type="device">
+  <diagram id="aiready-stacks" name="AIReady stacks">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="AIReady — AWS スタック全体（論理）&#xa;公式 AWS アイコン（diagrams.net / AWS 4 ライブラリ）" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=16;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="520" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_connect" value="AIReadyConnectStack" style="swimlane;horizontal=1;startSize=26;fillColor=#E5F5FD;strokeColor=#82B6D9;fontStyle=1;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="v_conn_fn" value="Connect Lambdas" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" vertex="1" parent="lane_connect">
+          <mxGeometry x="30" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="v_conn_ddb" value="FileMetadata" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#C925D1;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.dynamodb;" vertex="1" parent="lane_connect">
+          <mxGeometry x="160" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_gov" value="AIReadyGovernanceStack" style="swimlane;horizontal=1;startSize=26;fillColor=#E5F5FD;strokeColor=#82B6D9;fontStyle=1;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="360" y="90" width="280" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="v_gov_ddb" value="AIReadyGov DDB" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#C925D1;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.dynamodb;" vertex="1" parent="lane_gov">
+          <mxGeometry x="30" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="v_gov_fn" value="analyzeExposure" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" vertex="1" parent="lane_gov">
+          <mxGeometry x="160" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_ont" value="AIReadyOntology-CoreStack" style="swimlane;horizontal=1;startSize=26;fillColor=#E5F5FD;strokeColor=#82B6D9;fontStyle=1;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="680" y="90" width="560" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="v_ont_ddb" value="Ontology DDB" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#C925D1;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.dynamodb;" vertex="1" parent="lane_ont">
+          <mxGeometry x="20" y="46" width="64" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="v_fifo" value="EntityResolution FIFO" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#E7157B;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.sqs;" vertex="1" parent="lane_ont">
+          <mxGeometry x="110" y="46" width="64" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="v_topic" value="Alerts SNS" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#E7157B;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.sns;" vertex="1" parent="lane_ont">
+          <mxGeometry x="200" y="46" width="64" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="v_st" value="schemaTransform" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=10;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" vertex="1" parent="lane_ont">
+          <mxGeometry x="290" y="46" width="64" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="v_er" value="entityResolver / profileUpdate / lineage" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=9;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.lambda;" vertex="1" parent="lane_ont">
+          <mxGeometry x="380" y="40" width="64" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_mon" value="AIReadyOntology-MonitoringStack" style="swimlane;horizontal=1;startSize=26;fillColor=#FFF4E5;strokeColor=#D79B00;fontStyle=1;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="40" y="420" width="240" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="v_cw" value="Alarms / Dashboard" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#F34482;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.cloudwatch;" vertex="1" parent="lane_mon">
+          <mxGeometry x="70" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_aurora" value="AIReadyOntology-AuroraStack" style="swimlane;horizontal=1;startSize=26;fillColor=#E5F5FD;strokeColor=#82B6D9;fontStyle=1;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="320" y="420" width="300" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="v_aurora" value="Aurora PG" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#C925D1;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.aurora;" vertex="1" parent="lane_aurora">
+          <mxGeometry x="40" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="v_sec" value="DB secret" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#DD344C;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.secrets_manager;" vertex="1" parent="lane_aurora">
+          <mxGeometry x="170" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_dash" value="AIReadyDashboardStack" style="swimlane;horizontal=1;startSize=26;fillColor=#E5F5FD;strokeColor=#82B6D9;fontStyle=1;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="660" y="420" width="420" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="v_alb" value="ALB" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#8C4FFF;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.elastic_load_balancing;" vertex="1" parent="lane_dash">
+          <mxGeometry x="30" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="v_ecs" value="Fargate API+Web" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#ED7100;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ecs;" vertex="1" parent="lane_dash">
+          <mxGeometry x="150" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="v_ecr" value="ECR" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=#ED7100;strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=0;aspect=fixed;pointerEvents=1;shape=mxgraph.aws4.resourceIcon;resIcon=mxgraph.aws4.ecr;" vertex="1" parent="lane_dash">
+          <mxGeometry x="270" y="46" width="78" height="78" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="write" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="lane_connect" source="v_conn_fn" target="v_conn_ddb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="DDB stream" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;fontColor=#232F3E" edge="1" parent="1" source="v_conn_ddb" target="v_st">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="600" y="200" />
+              <mxPoint x="600" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e3" value="DDB stream" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;fontColor=#232F3E" edge="1" parent="1" source="v_conn_ddb" target="v_gov_fn">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="500" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="lane_ont" source="v_st" target="v_ont_ddb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="v_st" target="v_gov_ddb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="lane_ont" source="v_fifo" target="v_er">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="lane_ont" source="v_er" target="v_ont_ddb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="lane_ont" source="v_er" target="v_topic">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="Import SNS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="v_cw" target="v_topic">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="160" y="400" />
+              <mxPoint x="900" y="400" />
+              <mxPoint x="900" y="200" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="lane_dash" source="v_alb" target="v_ecs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="pull" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="lane_dash" source="v_ecr" target="v_ecs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="optional" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="v_ecs" target="v_aurora">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="lane_aurora" source="v_aurora" target="v_sec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

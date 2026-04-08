@@ -11,6 +11,7 @@ import os
 import signal
 import sys
 import uuid
+from pathlib import Path
 from contextlib import asynccontextmanager
 import uvicorn
 from ascii_colors import ASCIIColors
@@ -33,6 +34,11 @@ from services.log_sanitizer import RedactingLogFilter
 from services.ontology_ops_validator import (
     run_ontology_ops_checks,
     run_production_gate_checks,
+)
+from services.remediation_stub_409_env import (
+    apply_local_governance_remediation_stub_409_policy,
+    apply_local_placeholder_409_block_env_policy,
+    apply_local_strict_stub_409_env_policy,
 )
 from services.runtime_config import load_aws_runtime_config, validate_runtime_config
 from utils_api import (
@@ -69,6 +75,28 @@ def setup_signal_handlers() -> None:
 
 
 def create_app(args):
+    # Match `main()`: any ASGI entry gets default remediation NDJSON env (opt-out / prod skip).
+    _apply_default_remediation_debug_env()
+    # Runs for any ASGI entry (not only `python graphsuite_server.py`), so machine-level
+    # GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK is cleared in local dev consistently.
+    apply_local_governance_remediation_stub_409_policy()
+    apply_local_placeholder_409_block_env_policy()
+    apply_local_strict_stub_409_env_policy()
+    from services.governance_api_service import _maybe_append_remediation_debug_log
+
+    _maybe_append_remediation_debug_log(
+        {"action": "app_bootstrap", "finding_id": None, "tenant_id": None},
+        {},
+        outcome="ok",
+        stage="create_app.after_env",
+        debug_source="graphsuite_server.create_app",
+        extra_data={
+            "cwd": str(Path.cwd()),
+            "gr_debug": (os.getenv("GRAPHSUITE_DEBUG_REMEDIATION") or ""),
+            "gr_log_path_env": (os.getenv("GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH") or ""),
+            "env_profile": (os.getenv("GRAPHSUITE_ENV") or os.getenv("ENV") or ""),
+        },
+    )
     api_key = os.getenv("LIGHTRAG_API_KEY") or args.key
     runtime_config = load_aws_runtime_config()
     connect_settings = load_connect_settings()
@@ -257,7 +285,7 @@ def get_application(args=None):
 
 
 def configure_logging() -> None:
-    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "graphsuite"):
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "graphsuite", "services"):
         lg = logging.getLogger(logger_name)
         lg.handlers = []
         lg.filters = []
@@ -324,6 +352,12 @@ def configure_logging() -> None:
                     "level": "INFO",
                     "propagate": False,
                 },
+                # services.* (e.g. services.connect_service) — otherwise INFO only reached root (WARNING) and skipped file
+                "services": {
+                    "handlers": ["console", "file"],
+                    "level": "INFO",
+                    "propagate": False,
+                },
             },
             "filters": {
                 "redaction_filter": {
@@ -331,6 +365,42 @@ def configure_logging() -> None:
                 },
             },
         }
+    )
+
+
+def _apply_default_remediation_debug_env() -> None:
+    """Governance remediation NDJSON: default-on when unset (opt out: GRAPHSUITE_DEBUG_REMEDIATION=0).
+
+    Ensures logs appear even if the parent shell did not pass env into the API process
+    (e.g. Windows Start-Process). Skips implicit enable when GRAPHSUITE_ENV/ENV looks like prod.
+    """
+    raw = (os.getenv("GRAPHSUITE_DEBUG_REMEDIATION") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return
+    repo_root = Path(__file__).resolve().parent.parent
+    log_default = str((repo_root / "graphsuite-governance-remediation.ndjson").resolve())
+    if raw in {"1", "true", "yes", "on"}:
+        if not (os.getenv("GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH") or "").strip():
+            os.environ["GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH"] = log_default
+        return
+    profile = (os.getenv("GRAPHSUITE_ENV") or os.getenv("ENV") or "").strip().lower()
+    if profile in {"production", "prod", "staging"}:
+        # Do not auto-enable NDJSON in prod-like profiles, but always default the log path so
+        # explicit GRAPHSUITE_DEBUG_REMEDIATION=1 still resolves a writable file.
+        os.environ.setdefault("GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH", log_default)
+        print(
+            "[graphsuite] remediation NDJSON: prod-like profile; set GRAPHSUITE_DEBUG_REMEDIATION=1 "
+            f"to append {os.environ['GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH']}",
+            flush=True,
+        )
+        return
+    os.environ["GRAPHSUITE_DEBUG_REMEDIATION"] = "1"
+    os.environ.setdefault("GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH", log_default)
+    print(
+        "[graphsuite] remediation debug NDJSON enabled by default -> "
+        f"{os.environ['GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH']} "
+        "(set GRAPHSUITE_DEBUG_REMEDIATION=0 to disable)",
+        flush=True,
     )
 
 
@@ -355,6 +425,8 @@ def main():
 
     if not check_env_file():
         sys.exit(1)
+
+    _apply_default_remediation_debug_env()
 
     check_and_install_dependencies()
 

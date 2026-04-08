@@ -1597,7 +1597,11 @@ const ConnectionsPage = ({
                       ? `subscription_id=${pendingDeleteSubscription.id}`
                       : ''}
                     <br />
-                    安全モードは Graph解除失敗時に削除しません。強制モードは失敗時でもローカル接続を削除します。
+                    安全モードは Graph 購読の解除に失敗した場合、ローカルの接続レコードを残します。強制モードは失敗時でもローカル接続を削除します。
+                    <br />
+                    いずれのモードでも、削除が完了すると当該ドライブに紐づく Governance
+                    検知結果（ExposureFinding）はベストエフォートでクローズされます。FileMetadata
+                    の強制削除は強制モード時のみ（既存のカスケード削除）です。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
@@ -2167,8 +2171,13 @@ const ConnectOperations = () => {
       }
       try {
         const result = await deleteConnectSubscription(subscriptionId, connectionId, mode)
+        const g = result.governance_findings_close
+        const govHint =
+          g != null
+            ? ` / findings_closed=${g.findings_closed} (fm_rows=${g.file_metadata_rows})`
+            : ''
         toast.success('接続を削除しました。', {
-          description: `mode=${mode} / connection_id=${result.connection_id} / graph=${result.graph_unsubscribe_status}`
+          description: `mode=${mode} / connection_id=${result.connection_id} / graph=${result.graph_unsubscribe_status}${govHint}`
         })
         await loadConnectData()
         await loadConnectEventsData(selectedScopeIdForEvents)

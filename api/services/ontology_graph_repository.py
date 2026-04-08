@@ -2282,6 +2282,49 @@ def _normalize_for_similarity(value: str) -> str:
     return normalized.replace(" ", "").replace("-", "").replace("_", "")
 
 
+def load_ontology_entity_candidate_rows_from_graph_db(
+    tenant_id: str,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """テナント別 SQLite（/ontology/entity-candidates と同一 DB）から候補行を読む。
+
+    DynamoDB ``AIReadyOntology-EntityCandidate`` へ書き込むパイプラインが無い環境では
+    テーブルが空のままとなる。オーバービューの件数・high_spread は UI と整合させるため、
+    SQLite に 1 件以上あればそちらを正とする。
+    """
+    with _tenant_scope(tenant_id):
+        initialize_ontology_graph_db()
+        seed_ontology_graph_sample_data(tenant_id=tenant_id, force=False)
+    with _connect() as conn:
+        cur = conn.cursor()
+        rows_raw = cur.execute(
+            """
+            SELECT candidate_id, surface_form, entity_type, item_id, status, resolved_entity_id
+            FROM ontology_entity_candidates
+            """
+        ).fetchall()
+        pending_row = cur.execute(
+            """
+            SELECT COUNT(1) AS c FROM ontology_entity_candidates
+            WHERE LOWER(COALESCE(status, '')) = 'pending'
+            """
+        ).fetchone()
+        pending = int(pending_row["c"] if pending_row else 0)
+    rows: list[dict[str, Any]] = []
+    for r in rows_raw:
+        rows.append(
+            {
+                "tenant_id": tenant_id,
+                "candidate_id": r["candidate_id"],
+                "surface_form": r["surface_form"],
+                "entity_type": r["entity_type"],
+                "item_id": r["item_id"],
+                "status": r["status"],
+                "resolved_entity_id": r["resolved_entity_id"],
+            }
+        )
+    return rows, len(rows), pending
+
+
 def _candidate_match_score(surface_form: str, canonical_name: str) -> float:
     left = _normalize_for_similarity(surface_form)
     right = _normalize_for_similarity(canonical_name)

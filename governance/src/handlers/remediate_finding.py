@@ -80,9 +80,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 finding_id,
                 approved_by=operator,
             )
-            if _execution_mode() == "approval_then_auto_execute":
+            if _execution_mode() in {"approval_then_auto_execute", "approval_then_execute"}:
                 approved_mode = str(payload.get("remediation_mode") or "").strip().lower()
-                if approved_mode not in {"owner_review", "manual", "recommend_only"}:
+                skip_auto = approved_mode in {"owner_review", "manual", "recommend_only"}
+                if not skip_auto:
                     payload = execute_remediation(
                         tenant_id,
                         finding_id,

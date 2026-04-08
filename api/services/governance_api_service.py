@@ -7,9 +7,11 @@ import uuid
 import logging
 import json
 import sys
+import time
 import subprocess
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -25,6 +27,10 @@ from services.aws_clients import (
 from services.governance_repository import (
     list_governance_findings,
 )
+from services.remediation_stub_409_env import (
+    apply_local_strict_stub_409_env_policy,
+    is_placeholder_409_clear_blocked,
+)
 from services.runtime_config import load_aws_runtime_config
 
 _runtime_config = load_aws_runtime_config()
@@ -33,6 +39,7 @@ _lambda_client = None
 _logs_client = None
 _ssm_client = None
 logger = logging.getLogger(__name__)
+_REMEDIATION_DEBUG_GATE_WARNED = False
 
 
 def _now_utc() -> datetime:
@@ -124,6 +131,38 @@ def _allow_local_remediation_fallback() -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _allow_stub_409_local_fallback() -> bool:
+    """Whether to try local handler after Lambda returns 409 with error 'state conflict'.
+
+    This placeholder response is not produced by the in-repo governance handler; it is
+    independent of GOVERNANCE_REMEDIATION_LOCAL_FALLBACK / strict mode so stub Lambdas
+    can be bypassed in dev.
+
+    Opt out: GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK=1|true|yes|on.
+    GOVERNANCE_REMEDIATION_STUB_409_FALLBACK is legacy and no longer read (avoids accidental \"0\" from shells/tests).
+    """
+    return str(os.getenv("GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK", "")).strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _remediation_use_local_only() -> bool:
+    """If true, never invoke remediation Lambda; always use local governance handler subprocess.
+
+    For local/offline dev when the deployed function is a stub or DynamoDB should match
+    api/.env only. Opt-in: GOVERNANCE_REMEDIATION_USE_LOCAL_ONLY=1|true|yes|on.
+    """
+    return str(os.getenv("GOVERNANCE_REMEDIATION_USE_LOCAL_ONLY", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _report_bucket_name() -> str:
     return (os.getenv("GOVERNANCE_REPORT_BUCKET") or "").strip()
 
@@ -134,6 +173,185 @@ class GovernanceRemediationProxyError(RuntimeError):
     def __init__(self, status_code: int, message: str):
         self.status_code = int(status_code)
         super().__init__(message)
+
+
+def _remediation_debug_log_candidate_paths() -> list[Path]:
+    """Resolve NDJSON log targets (first writable wins).
+
+    Order: GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH, repo root, api/ (uvicorn cwd is often api/),
+    then process cwd (may duplicate api/ when cwd is api).
+    """
+    out: list[Path] = []
+    raw = (os.getenv("GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH") or "").strip()
+    if raw:
+        out.append(Path(raw).expanduser())
+    here = Path(__file__).resolve()
+    root = here.parents[2]
+    api_dir = here.parents[1]
+    out.append(api_dir / "graphsuite-governance-remediation.ndjson")
+    out.append(root / "graphsuite-governance-remediation.ndjson")
+    out.append(Path.cwd() / "graphsuite-governance-remediation.ndjson")
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for p in out:
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique
+
+
+def _remediation_debug_log_gate_blocked(
+    *,
+    payload: dict[str, Any],
+    stage: str | None,
+    outcome: str,
+) -> None:
+    """Append minimal NDJSON when GRAPHSUITE_DEBUG_REMEDIATION is off (optional diagnostics)."""
+    global _REMEDIATION_DEBUG_GATE_WARNED
+    here = Path(__file__).resolve()
+    root = here.parents[2]
+    api_dir = here.parents[1]
+    rec: dict[str, Any] = {
+        "hypothesisId": "remediation-debug-gate",
+        "source": "governance_api_service.remediation_proxy",
+        "data": {
+            "gate": "ndjson_skipped",
+            "reason": "GRAPHSUITE_DEBUG_REMEDIATION_not_on",
+            "env_value_preview": (os.getenv("GRAPHSUITE_DEBUG_REMEDIATION") or "")[:80],
+            "stage": stage,
+            "outcome": outcome,
+            "action": str(payload.get("action", "")),
+            "finding_id": payload.get("finding_id"),
+            "tenant_id": payload.get("tenant_id"),
+            "repo_root_resolved": str(root),
+        },
+        "timestamp": int(time.time() * 1000),
+    }
+    line = json.dumps(rec, ensure_ascii=True, default=str) + "\n"
+    targets = (
+        api_dir / "graphsuite-governance-remediation.ndjson",
+        root / "graphsuite-governance-remediation.ndjson",
+    )
+    last_exc: BaseException | None = None
+    written_path: str | None = None
+    for target in targets:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as f:
+                f.write(line)
+            written_path = str(target.resolve())
+            break
+        except Exception as exc:
+            last_exc = exc
+    if written_path is None:
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except Exception:
+            pass
+        logger.error(
+            "remediation-debug-gate: could not write NDJSON (api or repo root): %s",
+            last_exc,
+        )
+    if not _REMEDIATION_DEBUG_GATE_WARNED:
+        _REMEDIATION_DEBUG_GATE_WARNED = True
+        logger.warning(
+            "GRAPHSUITE_DEBUG_REMEDIATION is off; remediation NDJSON skipped. "
+            "Set GRAPHSUITE_DEBUG_REMEDIATION=1 or use .\\run.ps1. "
+            "Gate line: api/graphsuite-governance-remediation.ndjson or repo root; else stderr.",
+        )
+
+
+def log_governance_remediation_route_debug(
+    *,
+    action: str,
+    finding_id: str,
+    tenant_id: str,
+) -> None:
+    """When GRAPHSUITE_DEBUG_REMEDIATION=1, record that the FastAPI route ran (before Lambda/local handler)."""
+    _maybe_append_remediation_debug_log(
+        {"action": action, "finding_id": finding_id, "tenant_id": tenant_id},
+        {},
+        outcome="route_hit",
+        stage="graph_routes.before_service",
+        debug_source="graph_routes.remediation",
+    )
+
+
+def _maybe_append_remediation_debug_log(
+    payload: dict[str, Any],
+    body: dict[str, Any],
+    *,
+    outcome: str = "success",
+    stage: str | None = None,
+    handler_status: int | None = None,
+    error_message: str | None = None,
+    debug_source: str | None = None,
+    extra_data: dict[str, Any] | None = None,
+) -> None:
+    """Set GRAPHSUITE_DEBUG_REMEDIATION=1 to append NDJSON lines for remediation proxy tracing.
+
+    Override path with GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH (absolute recommended).
+    """
+    if str(os.getenv("GRAPHSUITE_DEBUG_REMEDIATION", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+        if not os.getenv("PYTEST_CURRENT_TEST"):
+            _remediation_debug_log_gate_blocked(payload=payload, stage=stage, outcome=outcome)
+        return
+    err = (error_message or "")[:800]
+    record_base = {
+        "source": debug_source or "governance_api_service.remediation_proxy",
+        "hypothesisId": "governance-remediation-proxy",
+        "data": {
+            "outcome": outcome,
+            "stage": stage,
+            "handler_status": handler_status,
+            "error_message": err or None,
+            "action": str(payload.get("action", "")),
+            "finding_id": payload.get("finding_id"),
+            "tenant_id": payload.get("tenant_id"),
+            "remediation_state": body.get("remediation_state"),
+            "remediationState": body.get("remediationState"),
+            "auto_execute_skipped": body.get("auto_execute_skipped"),
+            "body_keys": sorted(body.keys())[:50],
+        },
+        "timestamp": int(time.time() * 1000),
+    }
+    if extra_data:
+        for k, v in extra_data.items():
+            record_base["data"][k] = v
+    last_exc: BaseException | None = None
+    for log_path in _remediation_debug_log_candidate_paths():
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            record = dict(record_base)
+            record["data"] = dict(record_base["data"])
+            record["data"]["debug_log_path"] = str(log_path.resolve())
+            line = json.dumps(record, ensure_ascii=True, default=str) + "\n"
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(line)
+            logger.info(
+                "GRAPHSUITE_DEBUG_REMEDIATION NDJSON ok stage=%s outcome=%s action=%s path=%s",
+                stage or "",
+                outcome,
+                str(payload.get("action", "")),
+                str(log_path.resolve()),
+            )
+            return
+        except Exception as exc:
+            last_exc = exc
+    fail_rec = dict(record_base)
+    fail_rec["data"] = dict(record_base["data"])
+    fail_rec["data"]["debug_log_path"] = None
+    fail_rec["data"]["file_write_error"] = str(last_exc)[:500] if last_exc else None
+    logger.warning(
+        "GRAPHSUITE_DEBUG_REMEDIATION: could not append remediation NDJSON to any path "
+        "(set GRAPHSUITE_DEBUG_REMEDIATION_LOG_PATH): %s",
+        last_exc,
+    )
 
 
 def _invoke_remediation_local(payload: dict[str, Any]) -> dict[str, Any]:
@@ -174,6 +392,14 @@ def _invoke_remediation_local(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if process.returncode != 0:
         stderr = (process.stderr or "").strip()
+        _maybe_append_remediation_debug_log(
+            payload,
+            {},
+            outcome="error",
+            stage="local_subprocess",
+            handler_status=500,
+            error_message=stderr or f"exit={process.returncode}",
+        )
         raise GovernanceRemediationProxyError(
             500,
             f"local remediation fallback failed: {stderr or f'exit={process.returncode}'}",
@@ -183,6 +409,14 @@ def _invoke_remediation_local(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         lambda_payload = json.loads(raw_payload)
     except json.JSONDecodeError as exc:
+        _maybe_append_remediation_debug_log(
+            payload,
+            {},
+            outcome="error",
+            stage="local_json_decode",
+            handler_status=500,
+            error_message=str(exc),
+        )
         raise GovernanceRemediationProxyError(
             500,
             f"invalid local remediation payload: {raw_payload[:200]}",
@@ -199,7 +433,16 @@ def _invoke_remediation_local(payload: dict[str, Any]) -> dict[str, Any]:
         body = {"message": str(body)}
     if handler_status >= 400:
         message = str(body.get("error") or body.get("message") or "remediation failed")
+        _maybe_append_remediation_debug_log(
+            payload,
+            body,
+            outcome="error",
+            stage="local_handler",
+            handler_status=handler_status,
+            error_message=message,
+        )
         raise GovernanceRemediationProxyError(handler_status, message)
+    _maybe_append_remediation_debug_log(payload, body)
     return body
 
 
@@ -208,7 +451,15 @@ def _list_all_findings(tenant_id: str) -> list[dict[str, Any]]:
         tenant_id=tenant_id,
         limit=500,
         offset=0,
-        statuses=["new", "open", "acknowledged", "closed", "completed", "remediated"],
+        statuses=[
+            "new",
+            "open",
+            "acknowledged",
+            "closed",
+            "completed",
+            "remediated",
+            "in_progress",
+        ],
         include_document_analysis=False,
     )
     return [_to_plain(row) for row in response.get("rows", [])]
@@ -354,7 +605,29 @@ def _build_v12_overview(
                 "assurance": 100.0,
             },
             "subscores_breakdown": {
-                "oversharing_control": [],
+                "oversharing_control": [
+                    {
+                        "key": "public_link_incident",
+                        "label": "公開リンク事故",
+                        "value": 0.0,
+                        "score": 100.0,
+                        "issue_count": 0,
+                    },
+                    {
+                        "key": "external_domain_incident",
+                        "label": "外部ドメイン共有事故",
+                        "value": 0.0,
+                        "score": 100.0,
+                        "issue_count": 0,
+                    },
+                    {
+                        "key": "internal_oversharing_incident",
+                        "label": "社内過剰共有事故",
+                        "value": 0.0,
+                        "score": 100.0,
+                        "issue_count": 0,
+                    },
+                ],
                 "assurance": [],
             },
             "coverage": {
@@ -369,17 +642,23 @@ def _build_v12_overview(
                 "level": "High",
                 "scan_confidence": 1.0,
             },
-            "risk_summary": {
-                "governance_raw": 0.0,
-                "exception_debt": 0.0,
-                "coverage_penalty": 0.0,
-            },
+        "risk_summary": {
+            "governance_raw": 0.0,
+            "exception_debt": 0.0,
+            "coverage_penalty": 0.0,
+            "legacy_blended_governance_score": 100.0,
+        },
+        "governance_incident_counts": {
+            "total_denominator": 0,
+            "public_link": 0,
+            "external_domain_share": 0,
+            "internal_oversharing": 0,
+            "unclassified": 0,
+        },
         }
 
     raw_values = [_resolve_raw_residual_risk(row) for row in findings]
     avg_raw = sum(raw_values) / len(findings)
-    exposure_values = [_clamp01(_safe_float(row.get("exposure_score"), 0.5)) for row in findings]
-    oversharing_risk = sum(raw * exposure for raw, exposure in zip(raw_values, exposure_values)) / len(findings)
 
     scan_confidences = [_resolve_scan_confidence(row) for row in findings]
     avg_scan_confidence = sum(scan_confidences) / len(findings)
@@ -440,7 +719,7 @@ def _build_v12_overview(
     coverage_penalty = _clamp01(1.0 - coverage_score)
 
     governance_raw = _clamp01(avg_raw)
-    governance_score = round(
+    legacy_blended_governance_score = round(
         _clamp_score(
             100.0
             * (
@@ -455,7 +734,18 @@ def _build_v12_overview(
         1,
     )
 
-    oversharing_control = round(_clamp_score(100.0 * (1.0 - oversharing_risk)), 1)
+    incident_base_rows = _governance_incident_base_rows(findings)
+    total_incident_den = len(incident_base_rows)
+    ic = _governance_incident_counts(incident_base_rows)
+    c_pub = ic["public_link"]
+    c_ext = ic["external_domain_share"]
+    c_int = ic["internal_oversharing"]
+    score_pub = _negative_ratio_score(c_pub, total_incident_den)
+    score_ext = _negative_ratio_score(c_ext, total_incident_den)
+    score_int = _negative_ratio_score(c_int, total_incident_den)
+    oversharing_control = round(_clamp_score((score_pub + score_ext + score_int) / 3.0), 1)
+    governance_score = oversharing_control
+
     assurance = round(
         _clamp_score(
             100.0
@@ -478,87 +768,34 @@ def _build_v12_overview(
         else "Low"
     )
 
-    avg_audience_scope = sum(
-        _clamp01(_safe_float(row.get("audience_scope_score"), 0.0))
-        for row in findings
-    ) / len(findings)
-    avg_public_link_risk = sum(
-        _clamp01(
-            _safe_float(
-                row.get("public_link_risk_score"),
-                1.0 if _has_vector(row, "public_link") else 0.0,
-            )
-        )
-        for row in findings
-    ) / len(findings)
-    avg_privilege_strength = sum(
-        _clamp01(_safe_float(row.get("privilege_strength_score"), 0.0))
-        for row in findings
-    ) / len(findings)
-    avg_discoverability = sum(
-        _clamp01(_safe_float(row.get("discoverability_score"), 0.0))
-        for row in findings
-    ) / len(findings)
-    avg_externality = sum(
-        _clamp01(_safe_float(row.get("externality_score"), 0.0))
-        for row in findings
-    ) / len(findings)
-    avg_reshare = sum(
-        _clamp01(_safe_float(row.get("reshare_capability_score"), 0.0))
-        for row in findings
-    ) / len(findings)
-    avg_permission_outlier = sum(
-        _clamp01(_safe_float(row.get("permission_outlier_score"), 0.0))
-        for row in findings
-    ) / len(findings)
     avg_age_factor = sum(
         _clamp01(_safe_float(row.get("age_factor"), 0.0))
         for row in findings
     ) / len(findings)
 
+    _ratio_inc = (lambda c: round(float(c) / float(total_incident_den), 4) if total_incident_den > 0 else 0.0)
     subscores_breakdown = {
         "oversharing_control": [
             {
-                "key": "broad_audience_risk",
-                "label": "公開到達篁E��リスク",
-                "value": round(avg_audience_scope, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_audience_scope)), 1),
+                "key": "public_link_incident",
+                "label": "公開リンク事故",
+                "value": _ratio_inc(c_pub),
+                "score": round(score_pub, 1),
+                "issue_count": int(c_pub),
             },
             {
-                "key": "public_link_risk",
-                "label": "公開リンクリスク",
-                "value": round(avg_public_link_risk, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_public_link_risk)), 1),
+                "key": "external_domain_incident",
+                "label": "外部ドメイン共有事故",
+                "value": _ratio_inc(c_ext),
+                "score": round(score_ext, 1),
+                "issue_count": int(c_ext),
             },
             {
-                "key": "privilege_excess_risk",
-                "label": "過剰権限リスク",
-                "value": round(avg_privilege_strength, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_privilege_strength)), 1),
-            },
-            {
-                "key": "discoverability_risk",
-                "label": "発見可能性リスク",
-                "value": round(avg_discoverability, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_discoverability)), 1),
-            },
-            {
-                "key": "external_boundary_risk",
-                "label": "外部共有墁E��リスク",
-                "value": round(avg_externality, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_externality)), 1),
-            },
-            {
-                "key": "reshare_risk",
-                "label": "再�E有リスク",
-                "value": round(avg_reshare, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_reshare)), 1),
-            },
-            {
-                "key": "permission_outlier_risk",
-                "label": "権限数異常リスク",
-                "value": round(avg_permission_outlier, 4),
-                "score": round(_clamp_score(100.0 * (1.0 - avg_permission_outlier)), 1),
+                "key": "internal_oversharing_incident",
+                "label": "社内過剰共有事故",
+                "value": _ratio_inc(c_int),
+                "score": round(score_int, 1),
+                "issue_count": int(c_int),
             },
         ],
         "assurance": [
@@ -618,6 +855,14 @@ def _build_v12_overview(
             "governance_raw": round(governance_raw, 4),
             "exception_debt": round(avg_exception_debt, 4),
             "coverage_penalty": round(coverage_penalty, 4),
+            "legacy_blended_governance_score": legacy_blended_governance_score,
+        },
+        "governance_incident_counts": {
+            "total_denominator": total_incident_den,
+            "public_link": int(c_pub),
+            "external_domain_share": int(c_ext),
+            "internal_oversharing": int(c_int),
+            "unclassified": int(ic["unclassified"]),
         },
     }
 
@@ -665,7 +910,7 @@ def _to_float(value: Any, default: float) -> float:
 
 
 def _is_active_status(row: dict[str, Any]) -> bool:
-    return str(row.get("status", "")).lower() in {"new", "open", "acknowledged"}
+    return str(row.get("status", "")).lower() in {"new", "open", "acknowledged", "in_progress"}
 
 
 def _round1_score(value: float) -> float:
@@ -678,6 +923,64 @@ def _has_vector(row: dict[str, Any], vector: str) -> bool:
         return False
     normalized = {str(item).strip().lower() for item in vectors}
     return vector.strip().lower() in normalized
+
+
+# Count-based oversharing: priority classification (one bucket per finding).
+_GOVERNANCE_EXTERNAL_INCIDENT_VECTORS = frozenset(
+    {
+        "external_domain",
+        "external_domain_share",
+        "external_email_direct_share",
+        "guest_direct_share",
+        "guest",
+    }
+)
+_GOVERNANCE_INTERNAL_OVERSHARING_VECTORS = frozenset(
+    {
+        "excessive_permissions",
+        "all_users",
+        "org_link_editable",
+    }
+)
+
+
+def _exposure_vector_set(row: dict[str, Any]) -> set[str]:
+    vectors = row.get("exposure_vectors") or []
+    if not isinstance(vectors, list):
+        return set()
+    return {str(v).strip().lower() for v in vectors if str(v).strip()}
+
+
+def _classify_governance_incident_bucket(row: dict[str, Any]) -> str:
+    """Assign at most one bucket per finding: public_link > external > internal > unclassified."""
+    vs = _exposure_vector_set(row)
+    if not vs:
+        return "unclassified"
+    if "public_link" in vs:
+        return "public_link"
+    if vs & _GOVERNANCE_EXTERNAL_INCIDENT_VECTORS:
+        return "external_domain_share"
+    if vs & _GOVERNANCE_INTERNAL_OVERSHARING_VECTORS:
+        return "internal_oversharing"
+    return "unclassified"
+
+
+def _governance_incident_base_rows(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active = [row for row in findings if _is_active_status(row)]
+    return active if active else findings
+
+
+def _governance_incident_counts(base_rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "public_link": 0,
+        "external_domain_share": 0,
+        "internal_oversharing": 0,
+        "unclassified": 0,
+    }
+    for row in base_rows:
+        bucket = _classify_governance_incident_bucket(row)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
 
 
 def _is_remediated_status(row: dict[str, Any]) -> bool:
@@ -927,7 +1230,9 @@ def get_governance_overview(tenant_id: str) -> dict[str, Any]:
             "total_findings": len(findings),
             "active_findings": len(active_findings),
             "acknowledged": acknowledged_count,
+            "governance_incident_counts": v12.get("governance_incident_counts", {}),
         },
+        "governance_incident_counts": v12.get("governance_incident_counts", {}),
     }
 
 
@@ -1582,6 +1887,13 @@ def list_governance_audit_logs(
 
 def _invoke_remediation_lambda(payload: dict[str, Any]) -> dict[str, Any]:
     requested_action = str(payload.get("action", "")).strip().lower()
+    if _remediation_use_local_only():
+        logger.info(
+            "remediation: GOVERNANCE_REMEDIATION_USE_LOCAL_ONLY enabled; skipping lambda %s",
+            _remediation_lambda_name(),
+            extra={"action": requested_action, "finding_id": payload.get("finding_id")},
+        )
+        return _invoke_remediation_local(payload)
     try:
         response = _lambda().invoke(
             FunctionName=_remediation_lambda_name(),
@@ -1596,12 +1908,28 @@ def _invoke_remediation_lambda(payload: dict[str, Any]) -> dict[str, Any]:
                 extra={"lambda_name": _remediation_lambda_name()},
             )
             return _invoke_remediation_local(payload)
+        _maybe_append_remediation_debug_log(
+            payload,
+            {},
+            outcome="error",
+            stage="lambda_client_error",
+            handler_status=500,
+            error_message=str(exc),
+        )
         raise GovernanceRemediationProxyError(
             500,
             f"Error invoking governance finding remediation: {exc}",
         ) from exc
     raw_status_code = int(response.get("StatusCode", 500))
     if raw_status_code < 200 or raw_status_code >= 300:
+        _maybe_append_remediation_debug_log(
+            payload,
+            {},
+            outcome="error",
+            stage="lambda_invoke_http_status",
+            handler_status=raw_status_code,
+            error_message=f"remediation lambda invoke failed status={raw_status_code}",
+        )
         raise GovernanceRemediationProxyError(
             raw_status_code,
             f"remediation lambda invoke failed status={raw_status_code}",
@@ -1612,6 +1940,14 @@ def _invoke_remediation_lambda(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         lambda_payload = json.loads(raw_payload or "{}")
     except json.JSONDecodeError as exc:
+        _maybe_append_remediation_debug_log(
+            payload,
+            {},
+            outcome="error",
+            stage="lambda_payload_json",
+            handler_status=500,
+            error_message=str(exc),
+        )
         raise GovernanceRemediationProxyError(
             500, f"invalid remediation lambda payload: {raw_payload[:200]}"
         ) from exc
@@ -1641,7 +1977,121 @@ def _invoke_remediation_lambda(payload: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 # If local fallback is unavailable in this runtime, preserve original handler error.
                 pass
+        # Deployed placeholder Lambdas sometimes return 409 {"error":"state conflict"} for core
+        # workflow actions. Our in-repo handler never uses that exact string for RemediationConflictError.
+        stub_409_ok = False
+        strict_nl = False
+        placeholder_stub_409_branch = False
+        if (
+            handler_status == 409
+            and message.strip().lower() == "state conflict"
+            and requested_action in {"approve", "execute", "propose", "get"}
+        ):
+            apply_local_strict_stub_409_env_policy()
+            os.environ.pop("GRAPHSUITE_STRICT_STUB_409_NO_LOCAL", None)
+            os.environ.pop("GRAPHSUITE_BLOCK_PLACEHOLDER_409_DISABLE_CLEAR", None)
+            os.environ.pop("GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK", None)
+            placeholder_stub_409_branch = True
+            # Do not read getenv for this fingerprint: Windows/shell can leave STRICT visible to
+            # is_strict_stub_409_no_local() even after pop; always allow in-repo retry here.
+            strict_nl = False
+            stub_409_ok = True
+            logger.warning(
+                "remediation lambda 409 state conflict: action=%s stub_409_fallback_allowed=%s "
+                "strict_stub_409_no_local=%s placeholder_409_clear_blocked=%s "
+                "GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK=%r legacy_STUB_409=%r finding_id=%s",
+                requested_action,
+                stub_409_ok,
+                strict_nl,
+                is_placeholder_409_clear_blocked(),
+                os.getenv("GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK"),
+                os.getenv("GOVERNANCE_REMEDIATION_STUB_409_FALLBACK"),
+                payload.get("finding_id"),
+            )
+        if (
+            handler_status == 409
+            and message.strip().lower() == "state conflict"
+            and requested_action in {"approve", "execute", "propose", "get"}
+            and stub_409_ok
+        ):
+            logger.warning(
+                "remediation lambda returned 409 state conflict; trying local fallback handler.",
+                extra={"action": requested_action, "lambda_name": _remediation_lambda_name()},
+            )
+            try:
+                local_body = _invoke_remediation_local(payload)
+                _maybe_append_remediation_debug_log(
+                    payload,
+                    local_body if isinstance(local_body, dict) else {},
+                    outcome="success",
+                    stage="stub_409_local_fallback_ok",
+                )
+                return local_body
+            except Exception as loc_exc:
+                logger.warning(
+                    "remediation local fallback after 409 state conflict failed: %s",
+                    loc_exc,
+                    extra={
+                        "action": requested_action,
+                        "finding_id": payload.get("finding_id"),
+                        "lambda_name": _remediation_lambda_name(),
+                    },
+                )
+                _maybe_append_remediation_debug_log(
+                    payload,
+                    {"error": str(loc_exc)},
+                    outcome="error",
+                    stage="lambda_409_state_conflict_local_fallback_failed",
+                    handler_status=409,
+                    error_message=str(loc_exc)[:800],
+                    extra_data={
+                        "stub_409_fallback_allowed": _allow_stub_409_local_fallback(),
+                        "disable_stub_409_fallback_env": os.getenv(
+                            "GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK"
+                        ),
+                        "legacy_stub_409_env": os.getenv("GOVERNANCE_REMEDIATION_STUB_409_FALLBACK"),
+                    },
+                )
+                # Do not fall through: would re-raise the placeholder Lambda's 409 "state conflict"
+                # and hide the real local failure (e.g. 404 finding not found / wrong table).
+                if isinstance(loc_exc, GovernanceRemediationProxyError):
+                    raise GovernanceRemediationProxyError(
+                        loc_exc.status_code,
+                        "In-repo remediation after placeholder 409 (state conflict): "
+                        + str(loc_exc),
+                    ) from loc_exc
+                raise GovernanceRemediationProxyError(
+                    502,
+                    "In-repo remediation after placeholder 409 (state conflict) failed: "
+                    + str(loc_exc),
+                ) from loc_exc
+        extra_409_diag: dict[str, Any] | None = None
+        if handler_status == 409 and message.strip().lower() == "state conflict":
+            extra_409_diag = {
+                "strict_stub_409_no_local": strict_nl,
+                "placeholder_409_clear_blocked": is_placeholder_409_clear_blocked(),
+                "placeholder_stub_409_branch_entered": placeholder_stub_409_branch,
+                "stub_409_fallback_allowed": (
+                    stub_409_ok
+                    if placeholder_stub_409_branch
+                    else _allow_stub_409_local_fallback()
+                ),
+                "disable_stub_409_fallback_env": os.getenv(
+                    "GOVERNANCE_REMEDIATION_DISABLE_STUB_409_FALLBACK"
+                ),
+                "legacy_stub_409_env": os.getenv("GOVERNANCE_REMEDIATION_STUB_409_FALLBACK"),
+            }
+        _maybe_append_remediation_debug_log(
+            payload,
+            body,
+            outcome="error",
+            stage="lambda_handler",
+            handler_status=handler_status,
+            error_message=message,
+            extra_data=extra_409_diag,
+        )
         raise GovernanceRemediationProxyError(handler_status, message)
+    _maybe_append_remediation_debug_log(payload, body)
     return body
 
 

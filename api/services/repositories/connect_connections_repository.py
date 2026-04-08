@@ -62,6 +62,10 @@ class ConnectConnectionsRepository:
         team_id: str = "",
         channel_id: str = "",
         chat_id: str = "",
+        graph_tenant_id: str = "",
+        graph_client_id: str = "",
+        notification_url: str = "",
+        client_state: str = "",
     ) -> dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
         # GSI-SubscriptionId partition key cannot be an empty string; omit attribute until set.
@@ -83,13 +87,39 @@ class ConnectConnectionsRepository:
         }
         if subscription_key:
             item["subscription_id"] = subscription_key
+        gt = str(graph_tenant_id or "").strip()
+        if gt:
+            item["graph_tenant_id"] = gt
+        gc = str(graph_client_id or "").strip()
+        if gc:
+            item["graph_client_id"] = gc
+        nu = str(notification_url or "").strip()
+        if nu:
+            item["notification_url"] = nu
+        cs = str(client_state or "").strip()
+        if cs:
+            item["client_state"] = cs
         existing = self._table.get_item(
             Key={"tenant_id": tenant_id, "connection_id": connection_id}
         ).get("Item")
         if not existing:
             item["created_at"] = now_iso
         self._table.put_item(Item=item)
-        return item
+        return _to_plain_value(item)
+
+    def get_connection(
+        self,
+        *,
+        tenant_id: str,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        response = self._table.get_item(
+            Key={"tenant_id": tenant_id, "connection_id": connection_id}
+        )
+        item = response.get("Item")
+        if not item:
+            return None
+        return _to_plain_value(item)
 
     def latest_connection_for_tenant(self, tenant_id: str) -> dict[str, Any] | None:
         response = self._table.query(

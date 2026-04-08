@@ -271,6 +271,7 @@ def upsert_finding(
     # 再接続・再検知時は closed/new を open へ戻し、再評価結果を反映する。
     current_status = str(existing.get("status") or "").strip().lower()
     new_status = "open" if current_status in {"new", "closed"} else existing.get("status", "open")
+    remediation_state_existing = str(existing.get("remediation_state") or "").strip().lower()
     updated_risk_level = initial_risk_level
     updated_ai_eligible = compute_ai_eligible(
         updated_risk_level,
@@ -306,9 +307,52 @@ def upsert_finding(
     else:
         merged_exception_review_due_at = exception_review_due_at
 
+    # 旧フローで是正後すぐ completed になったがリスクが未だ高い行を、次回 upsert で in_progress に戻す。
+    reconcile_stale_completed = (
+        str(new_status).strip().lower() == "completed"
+        and updated_risk_level not in {"low", "none"}
+        and remediation_state_existing in {"executed", "manual_required"}
+    )
+    lifecycle_extra = ""
+    lifecycle_values: dict[str, Any] = {}
+    if reconcile_stale_completed:
+        new_status = "in_progress"
+        lifecycle_extra = """,
+                remediated_at = :remediated_at_reconcile"""
+        lifecycle_values = {":remediated_at_reconcile": None}
+
+    auto_complete_after_rescore = (
+        updated_risk_level in {"low", "none"}
+        and str(new_status).strip().lower() == "in_progress"
+        and remediation_state_existing in {"executed", "manual_required"}
+    )
+    if auto_complete_after_rescore:
+        new_status = "completed"
+        next_workflow_status = "normal"
+        next_exception_type = "none"
+        merged_exception_review_due_at = None
+
+    completion_extra = ""
+    completion_values: dict[str, Any] = {}
+    if auto_complete_after_rescore:
+        completion_extra = """,
+                suppress_until = :suppress_until,
+                acknowledged_reason = :ack_reason,
+                acknowledged_by = :ack_by,
+                acknowledged_at = :ack_at,
+                remediated_at = :remediated_at"""
+        completion_values = {
+            ":suppress_until": None,
+            ":ack_reason": None,
+            ":ack_by": None,
+            ":ack_at": None,
+            ":remediated_at": now,
+        }
+
     table.update_item(
         Key={"tenant_id": tenant_id, "finding_id": finding_id},
-        UpdateExpression="""
+        UpdateExpression=(
+            """
             SET risk_level = :rl,
                 ai_eligible = :ae,
                 exposure_vectors = :ev,
@@ -360,8 +404,10 @@ def upsert_finding(
                 broken_inheritance_score = :broken_inheritance_score,
                 permission_outlier_score = :permission_outlier_score,
                 last_evaluated_at = :now,
-                #st = :status
-        """,
+                #st = :status"""
+            + lifecycle_extra
+            + completion_extra
+        ),
         ExpressionAttributeNames={
             "#st": "status",
             "#size_attr": "size",
@@ -419,6 +465,8 @@ def upsert_finding(
             ":permission_outlier_score": float_to_decimal(float(exposure_result.details.get("permission_outlier_score", 0.00))),
             ":now": now,
             ":status": new_status,
+            **lifecycle_values,
+            **completion_values,
         },
     )
     existing["is_new"] = False

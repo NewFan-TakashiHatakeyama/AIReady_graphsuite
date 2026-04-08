@@ -30,6 +30,21 @@ import InitialScoringGateCard, {
 import HoverHelpLabel from '@/features/common/HoverHelpLabel'
 import TablePageControls from '@/features/common/TablePageControls'
 import { takeOperationDeepLinkForTab } from '@/features/common/operationDeepLink'
+import {
+  executionResultRows,
+  graphPermissionDeletionResultsComplete,
+  pickStr,
+  planActionType,
+  remediationActionsList,
+  remediationDetailMode,
+  remediationDetailPlanHasRemovePermissions,
+  remediationDetailState,
+  remediationResultPhase,
+  remediationResultPostVerification,
+  resultRowActionType,
+  resultRowPermissionId,
+  resultRowStatus,
+} from '@/features/governance/remediationPayloadFields'
 import { cn } from '@/lib/utils'
 import {
   GovernanceExceptionRegistrationRequest,
@@ -40,6 +55,7 @@ import {
   GovernanceScanJobApiRow,
   GovernanceSuppressionApiRow,
   approveGovernanceFindingRemediation,
+  executeGovernanceFindingRemediation,
   createGovernancePolicy,
   getGovernanceFindingRemediation,
   getGovernanceFindings,
@@ -56,6 +72,7 @@ import {
 } from '@/api/graphsuite'
 import OperationConfirmDialog from './components/OperationConfirmDialog'
 import RemediationWorkflowPanel from './components/RemediationWorkflowPanel'
+import { appendRemediationClientDebug } from '@/features/governance/remediationDebug'
 import ReadinessBreakdownD3 from './ReadinessBreakdownD3'
 import {
   FindingStatus,
@@ -94,7 +111,11 @@ const GOVERNANCE_PAGE_GUIDE: Record<GovernancePageKey, string> = {
 }
 
 const GOVERNANCE_GLOSSARY = [
-  { term: 'ガバナンススコア', description: 'raw_residual_risk 由来の総合スコア（0..100）です。' },
+  {
+    term: 'ガバナンススコア',
+    description:
+      '公開リンク・外部ドメイン共有・社内過剰共有の3件数指標から算出する総合スコア（0..100）です。Finding は優先順位付きで1カテゴリのみに分類されます。'
+  },
   { term: 'Coverage / Confidence', description: 'スキャン網羅率と信頼度を分離表示する運用指標です。' },
   { term: 'workflow_status', description: '表示上の運用状態です。acknowledged でも評価は継続します。' },
   { term: 'exception_type', description: '例外運用の種別（temporary_accept など）です。' },
@@ -116,7 +137,13 @@ const GOVERNANCE_TAB_HELP: Record<GovernancePageKey, string> = {
 
 const badgeVariantByValue = (value: string): BadgeProps['variant'] => {
   if (value === 'failed') return 'destructive'
-  if (value === 'open' || value === 'acknowledged' || value === 'running' || value === 'skipped') {
+  if (
+    value === 'open' ||
+    value === 'acknowledged' ||
+    value === 'in_progress' ||
+    value === 'running' ||
+    value === 'skipped'
+  ) {
     return 'secondary'
   }
   return 'outline'
@@ -132,6 +159,7 @@ const badgeClassByValue = (value: string): string => {
 
   // Finding / suppression statuses
   if (value === 'open' || value === 'new') return 'border-red-300 bg-red-100 text-red-800'
+  if (value === 'in_progress') return 'border-orange-300 bg-orange-100 text-orange-900'
   if (value === 'acknowledged') return 'border-amber-300 bg-amber-100 text-amber-900'
   if (value === 'completed' || value === 'remediated') return 'border-sky-300 bg-sky-100 text-sky-900'
   if (value === 'closed' || value === 'success') return 'border-emerald-300 bg-emerald-100 text-emerald-800'
@@ -153,13 +181,14 @@ const badgeClassByValue = (value: string): string => {
 const normalizeFindingStatus = (raw?: string): FindingStatus => {
   const s = String(raw ?? 'open').trim().toLowerCase()
   if (s === 'remediated') return 'completed'
-  const allowed: FindingStatus[] = ['new', 'open', 'completed', 'closed', 'acknowledged']
+  const allowed: FindingStatus[] = ['new', 'open', 'in_progress', 'completed', 'closed', 'acknowledged']
   if (allowed.includes(s as FindingStatus)) return s as FindingStatus
   return 'open'
 }
 
 const governanceFindingStatusLabel = (status: FindingStatus): string => {
   if (status === 'completed') return '完了'
+  if (status === 'in_progress') return '実行中'
   return status
 }
 
@@ -369,23 +398,19 @@ const transitionReason = (finding: GovernanceFinding): string => {
   if (finding.status === 'new') return '初回検知で new として登録'
   if (finding.status === 'open') return '再評価でリスク閾値以上のため open を維持'
   if (finding.workflowStatus === 'acknowledged') return 'workflow_status=acknowledged として例外運用中（評価は継続）'
+  if (finding.status === 'in_progress') {
+    return '是正実行済み。再評価でリスクが low になるまで実行中（完了は自動）'
+  }
   if (finding.status === 'completed') return '是正が完了し、ライフサイクルは完了（completed）へ遷移'
   return 'リスク閾値未満または対象解消により closed へ遷移'
 }
 
-const executionResultRows = (
-  detail: GovernanceRemediationDetailResponse | null
-): Array<Record<string, unknown>> => {
-  const rows = detail?.result?.results
-  return Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : []
-}
-
 const remediationExecutionSummary = (detail: GovernanceRemediationDetailResponse | null): string => {
-  if (String(detail?.result?.phase ?? '') === 'rollback') {
+  if (remediationResultPhase(detail) === 'rollback') {
     const rows = executionResultRows(detail)
     if (!rows.length) return 'ロールバック結果はまだ記録されていません。'
-    const restored = rows.filter((row) => String(row.status ?? '') === 'restored').length
-    const manualRequired = rows.filter((row) => String(row.status ?? '') === 'manual_required').length
+    const restored = rows.filter((row) => resultRowStatus(row as Record<string, unknown>) === 'restored').length
+    const manualRequired = rows.filter((row) => resultRowStatus(row as Record<string, unknown>) === 'manual_required').length
     const summaryParts = [
       restored > 0 ? `復元 ${restored}` : '',
       manualRequired > 0 ? `手動対応 ${manualRequired}` : ''
@@ -395,11 +420,15 @@ const remediationExecutionSummary = (detail: GovernanceRemediationDetailResponse
   }
   const rows = executionResultRows(detail)
   if (!rows.length) {
-    return detail?.remediation_state === 'manual_required'
-      ? '自動適用可能な是正アクションがなく、運用者による手動対応が必要です。'
-      : '是正実行結果はまだ記録されていません。'
+    if (remediationDetailState(detail) === 'manual_required') {
+      if (!remediationDetailPlanHasRemovePermissions(detail)) {
+        return '計画に共有権限の自動削除が含まれておらず、ラベル付与など別手順の手動対応が残っている可能性があります。'
+      }
+      return '自動適用可能な是正アクションがなく、運用者による手動対応が必要です。'
+    }
+    return '是正実行結果はまだ記録されていません。'
   }
-  const countBy = (status: string) => rows.filter((row) => String(row.status ?? '') === status).length
+  const countBy = (status: string) => rows.filter((row) => resultRowStatus(row as Record<string, unknown>) === status).length
   const deleted = countBy('deleted')
   const notFound = countBy('not_found')
   const manualRequired = countBy('manual_required')
@@ -419,7 +448,7 @@ const remediationExecutionSummary = (detail: GovernanceRemediationDetailResponse
 const remediationPostVerificationDeferredFootnote = (
   detail: GovernanceRemediationDetailResponse | null
 ): string | null => {
-  const pv = detail?.result?.post_verification
+  const pv = remediationResultPostVerification(detail)
   if (pv === undefined || pv === null) return null
   if (typeof pv === 'string') {
     if (pv === 'deferred_to_next_batch_scoring') {
@@ -438,11 +467,62 @@ const remediationPostVerificationDeferredFootnote = (
 
 const remediationManualReasonCodes = (detail: GovernanceRemediationDetailResponse | null): string[] => {
   const rows = executionResultRows(detail)
-  const reasonCodes = rows
-    .filter((row) => String(row.status ?? '') === 'manual_required')
-    .map((row) => String(row.reason ?? '').trim())
-    .filter(Boolean)
-  return Array.from(new Set(reasonCodes))
+  const codes = new Set<string>()
+  for (const row of rows) {
+    if (resultRowStatus(row) !== 'manual_required') continue
+    const rc = pickStr(row, 'reason_code', 'reasonCode')
+    if (rc) {
+      codes.add(rc)
+      continue
+    }
+    const legacy = String(row.reason ?? '').trim()
+    if (legacy) codes.add(legacy)
+  }
+  return Array.from(codes)
+}
+
+/** 管理者・サポート向け（UI では折りたたみ内のみ） */
+const buildRemediationTechnicalDiagnostics = (
+  detail: GovernanceRemediationDetailResponse | null,
+  finding: GovernanceFinding | null
+): string[] => {
+  const hints: string[] = []
+  if (!detail) return hints
+
+  const mode = String(detail.remediation_mode ?? finding?.remediationMode ?? '')
+    .trim()
+    .toLowerCase()
+  if (['manual', 'owner_review', 'recommend_only'].includes(mode)) {
+    hints.push(
+      `remediation_mode=${mode} のため、カタログは権限の自動削除を計画に含めずレビュー用アクションに差し替えています。`
+    )
+  }
+
+  const plan = remediationActionsList(detail)
+  const nonExecutable = plan.filter((a) => a && a.executable === false)
+  const hasRemove = plan.some((a) => planActionType(a) === 'remove_permissions')
+  if (nonExecutable.length > 0 && hasRemove) {
+    hints.push(
+      '計画に remove_permissions（自動実行）と executable=false のステップが混在している可能性があります。前者で Graph DELETE 後も後者により remediation_state=manual_required になり得ます。'
+    )
+  }
+
+  const rows = executionResultRows(detail)
+  const deleted = rows.filter((r) => resultRowStatus(r) === 'deleted').length
+  const manualSteps = rows.filter((r) => resultRowStatus(r) === 'manual_required').length
+  if (deleted > 0 && manualSteps > 0) {
+    hints.push(
+      `実行ログ: status=deleted ${deleted} 件 / manual_required ${manualSteps} 件。自動削除は一部成功している可能性があります。`
+    )
+  }
+
+  if (plan.length === 1 && planActionType(plan[0]) === 'manual_review') {
+    hints.push(
+      '計画が manual_review のみ: リムーバブルな organization/anonymous リンク行が無い、またはベクトル条件で remove_permissions が生成されていない可能性。permissions スナップショットと exposure_vectors を照合。'
+    )
+  }
+
+  return hints
 }
 
 const remediationManualReasonText = (reasonCode: string): string => {
@@ -471,7 +551,49 @@ const remediationManualReasonText = (reasonCode: string): string => {
   if (code === 'label_rollback_not_supported') {
     return 'ラベル適用の自動ロールバックは未対応のため、手動で戻し作業が必要です。'
   }
-  return '運用ポリシーまたは実行環境の制約により、手動対応が必要です。'
+  if (code === 'non_executable_action') {
+    return 'セキュリティや運用ルールのため、システムだけでは最後まで完了できない手順が含まれています。'
+  }
+  if (code === 'manual_review_planned') {
+    return '共有設定の確認や調整は、手作業での対応が必要です。'
+  }
+  return '運用ルールまたは環境の制約により、担当者による確認が必要です。'
+}
+
+const friendlyRemediationActionTypeLabel = (raw: string): string => {
+  const t = String(raw ?? '').trim().toLowerCase()
+  switch (t) {
+  case 'approval':
+    return '承認'
+  case 'manual_review':
+    return '内容の確認'
+  case 'owner_review':
+    return '所有者による確認'
+  case 'remove_permissions':
+    return '共有権限の変更'
+  case 'apply_sensitivity_label':
+    return '感度ラベル'
+  case 'suggest_restricted_access':
+    return 'アクセス制限の見直し'
+  case 'complete':
+    return '完了処理'
+  default:
+    return t ? '追加の手順' : '手順'
+  }
+}
+
+/** 一般ユーザー向けの1行説明（実行ログ1行分） */
+const friendlyManualRequiredStepSummary = (row: Record<string, unknown>): string => {
+  const at = resultRowActionType(row)
+  const msg = String(row.reason ?? '').trim()
+  const label = friendlyRemediationActionTypeLabel(at)
+  if (at === 'approval') {
+    return '承認フロー上、自動だけでは完了できない段階があります。共有設定を確認してください。'
+  }
+  if (msg && msg.length <= 220 && !/^[\w_]+$/.test(msg)) {
+    return `${label}が必要です。${msg}`
+  }
+  return `${label}が必要です。Microsoft 365 の共有設定を開き、内容を確認してください。`
 }
 
 const remediationManualChecklist = (
@@ -479,8 +601,8 @@ const remediationManualChecklist = (
   finding: GovernanceFinding
 ): string[] => {
   const actionTypes = new Set(
-    (detail?.actions ?? [])
-      .map((action) => String(action?.action_type ?? '').trim().toLowerCase())
+    remediationActionsList(detail)
+      .map((action) => planActionType(action))
       .filter(Boolean)
   )
   const checklist: string[] = []
@@ -669,14 +791,6 @@ const DETECTION_REASON_LABELS: Record<string, string> = {
   scenario_c_public_link: 'C: 公開リンク事故'
 }
 
-const GUARD_REASON_LABELS: Record<string, string> = {
-  g3_public_link: 'G3-公開リンク事故',
-  g3_external_direct_share: 'G3-外部直接共有事故',
-  g3_org_link_editable: 'G3-組織内編集リンクリスク',
-  g7_no_label: 'G7-ラベル未付与リスク',
-  g7_acl_drift: 'G7-権限ドリフトリスク'
-}
-
 const reasonPriorityWeight = (detectionReasons: string[] = []): number => {
   if (detectionReasons.includes('scenario_c_public_link')) return 3
   if (detectionReasons.includes('scenario_b_external_direct_share')) return 2
@@ -733,16 +847,12 @@ type GovernanceProtectionViewModel = {
       }>
     }>
   }>
+  /** 過剰共有の抑制（サブスコア）— 公開リンク / 外部ドメイン / 社内過剰の合成 */
+  oversharingScore: number
   governanceScore: number
   coverageScore: number
   confidenceLevel: 'High' | 'Medium' | 'Low'
   confidenceScore: number
-  riskSummary: {
-    governanceRaw: number
-    exceptionDebt: number
-    coveragePenalty: number
-  }
-  coverageBreakdown: Array<{ key: string; label: string; value: number }>
   scaleMax: number
 }
 
@@ -751,32 +861,31 @@ const normalizeDisplayScore = (value: number): number => {
   return value <= 1 ? value * 100 : value
 }
 
+const OVERSHARING_INCIDENT_KEYS = [
+  'public_link_incident',
+  'external_domain_incident',
+  'internal_oversharing_incident'
+] as const
+
+const OVERSHARING_INCIDENT_LABELS: Record<(typeof OVERSHARING_INCIDENT_KEYS)[number], string> = {
+  public_link_incident: '公開リンク事故',
+  external_domain_incident: '外部ドメイン共有事故',
+  internal_oversharing_incident: '社内過剰共有事故'
+}
+
 const defaultGovernanceProtectionViewModel = (): GovernanceProtectionViewModel => {
   return {
-    components: [
-      {
-        key: 'oversharing-control',
-        label: '過剰共有の抑制',
-        score: 0,
-        details: []
-      },
-      {
-        key: 'assurance',
-        label: '運用・保証',
-        score: 0,
-        details: []
-      }
-    ],
+    components: OVERSHARING_INCIDENT_KEYS.map((key) => ({
+      key,
+      label: OVERSHARING_INCIDENT_LABELS[key],
+      score: 0,
+      details: []
+    })),
+    oversharingScore: 0,
     governanceScore: 0,
     coverageScore: 0,
     confidenceLevel: 'Low',
     confidenceScore: 0,
-    riskSummary: {
-      governanceRaw: 0,
-      exceptionDebt: 0,
-      coveragePenalty: 0
-    },
-    coverageBreakdown: [],
     scaleMax: 100
   }
 }
@@ -786,7 +895,6 @@ const toGovernanceProtectionViewModel = (overview: GovernanceOverviewResponse | 
   const fallback = defaultGovernanceProtectionViewModel()
   const governanceScore = normalizeDisplayScore(Number(overview.governance_score ?? overview.protection_scores?.overall ?? 0))
   const oversharing = normalizeDisplayScore(Number(overview.subscores?.oversharing_control ?? overview.protection_scores?.oversharing_protection ?? 0))
-  const assurance = normalizeDisplayScore(Number(overview.subscores?.assurance ?? 0))
   const coverageScore = Number(overview.coverage?.coverage_score ?? 0)
   const confidenceScore = Number(overview.confidence?.scan_confidence ?? 0)
   const computedConfidence: 'High' | 'Medium' | 'Low' =
@@ -796,123 +904,73 @@ const toGovernanceProtectionViewModel = (overview: GovernanceOverviewResponse | 
         ? 'Medium'
         : 'Low'
   const confidenceLevel = (overview.confidence?.level ?? computedConfidence) as 'High' | 'Medium' | 'Low'
-  const riskSummary = {
-    governanceRaw: Number(overview.risk_summary?.governance_raw ?? 0),
-    exceptionDebt: Number(overview.risk_summary?.exception_debt ?? 0),
-    coveragePenalty: Number(overview.risk_summary?.coverage_penalty ?? 0)
-  }
   const breakdown = overview.subscores_breakdown
-  const oversharingOrder = [
-    'broad_audience_risk',
-    'public_link_risk',
-    'privilege_excess_risk',
-    'external_boundary_risk',
-    'discoverability_risk',
-    'reshare_risk',
-    'permission_outlier_risk'
-  ]
-  const assuranceOrder = ['aging_open_risk', 'exception_debt', 'coverage_score', 'rescan_freshness', 'scan_confidence']
   const legacyBreakdown = overview.protection_score_breakdown
+  const incidentCounts = overview.counts?.governance_incident_counts ?? overview.governance_incident_counts
+  const denom = Number(incidentCounts?.total_denominator ?? 0)
+  const legacyPub = Number(legacyBreakdown?.oversharing?.details?.public_link_exposure ?? 0)
+  const legacyEvery = Number(legacyBreakdown?.oversharing?.details?.everyone_public ?? 0)
+  const legacyExc = Number(legacyBreakdown?.oversharing?.details?.excessive_permission_remediation ?? 0)
   const fallbackOversharingRows = [
     {
-      key: 'broad_audience_risk',
-      label: '公開到達範囲リスク',
-      score: Number(legacyBreakdown?.oversharing?.details?.everyone_public ?? 0),
-      value: Number.isFinite(legacyBreakdown?.oversharing?.details?.everyone_public as number)
-        ? 1 - Number(legacyBreakdown?.oversharing?.details?.everyone_public ?? 0) / 100
-        : undefined
+      key: 'public_link_incident',
+      label: '公開リンク事故',
+      score: legacyPub,
+      value: denom > 0 ? Number(incidentCounts?.public_link ?? 0) / denom : undefined
     },
     {
-      key: 'public_link_risk',
-      label: '公開リンクリスク',
-      score: Number(legacyBreakdown?.oversharing?.details?.public_link_exposure ?? 0),
-      value: Number.isFinite(legacyBreakdown?.oversharing?.details?.public_link_exposure as number)
-        ? 1 - Number(legacyBreakdown?.oversharing?.details?.public_link_exposure ?? 0) / 100
-        : undefined
+      key: 'external_domain_incident',
+      label: '外部ドメイン共有事故',
+      score: legacyEvery,
+      value: denom > 0 ? Number(incidentCounts?.external_domain_share ?? 0) / denom : undefined
     },
     {
-      key: 'privilege_excess_risk',
-      label: '過剰権限リスク',
-      score: Number(legacyBreakdown?.oversharing?.details?.excessive_permission_remediation ?? 0),
-      value: Number.isFinite(legacyBreakdown?.oversharing?.details?.excessive_permission_remediation as number)
-        ? 1 - Number(legacyBreakdown?.oversharing?.details?.excessive_permission_remediation ?? 0) / 100
-        : undefined
+      key: 'internal_oversharing_incident',
+      label: '社内過剰共有事故',
+      score: legacyExc,
+      value: denom > 0 ? Number(incidentCounts?.internal_oversharing ?? 0) / denom : undefined
     }
   ]
-  const fallbackAssuranceRows = [
-    {
-      key: 'exception_debt',
-      label: '例外負債',
-      score: Number((1 - Math.max(0, Math.min(1, Number(overview.risk_summary?.exception_debt ?? 0)))) * 100),
-      value: Number(overview.risk_summary?.exception_debt ?? 0)
-    },
-    {
-      key: 'coverage_score',
-      label: 'カバレッジ',
-      score: Number((overview.coverage?.coverage_score ?? 0) * 100),
-      value: Number(overview.coverage?.coverage_score ?? 0)
-    },
-    {
-      key: 'scan_confidence',
-      label: 'スキャン信頼度',
-      score: Number((overview.confidence?.scan_confidence ?? 0) * 100),
-      value: Number(overview.confidence?.scan_confidence ?? 0)
+  type OversharingBreakdownRow = {
+    key?: string
+    label?: string
+    score?: number
+    value?: number
+    issue_count?: number
+  }
+  const oversharingSourceRows: OversharingBreakdownRow[] =
+    breakdown?.oversharing_control && breakdown.oversharing_control.length > 0
+      ? breakdown.oversharing_control
+      : fallbackOversharingRows
+  const oversharingByKey = new Map(
+    oversharingSourceRows.map((row) => [String(row.key ?? ''), row as OversharingBreakdownRow])
+  )
+  const incidentComponents = OVERSHARING_INCIDENT_KEYS.map((key) => {
+    const row = oversharingByKey.get(key)
+    const rawScore = Number(row?.score ?? 0)
+    const displayScore = normalizeDisplayScore(rawScore)
+    const noteParts: string[] = []
+    if (typeof row?.issue_count === 'number') noteParts.push(`件数=${String(row.issue_count)}`)
+    if (typeof row?.value === 'number') noteParts.push(`比率=${row.value.toFixed(4)}`)
+    const details =
+      noteParts.length > 0
+        ? [{ label: 'サマリ', score: displayScore, note: noteParts.join(' / ') }]
+        : []
+    return {
+      key,
+      label: OVERSHARING_INCIDENT_LABELS[key],
+      score: displayScore,
+      details
     }
-  ]
-  const toDetails = (
-    rows: Array<{ key?: string; label?: string; score?: number; value?: number }> | undefined,
-    fallbackRows: Array<{ key?: string; label?: string; score?: number; value?: number }>,
-    orderedKeys: string[]
-  ): Array<{ label: string; score: number; note?: string }> =>
-    (() => {
-      type BreakdownRow = { key: string; label: string; score: number; value?: number }
-      const byKey = new Map(
-        (rows && rows.length > 0 ? rows : fallbackRows).map((row) => [
-          String(row.key ?? ''),
-          {
-            key: String(row.key ?? ''),
-            label: String(row.label ?? '-'),
-            score: Number(row.score ?? 0),
-            value: typeof row.value === 'number' ? row.value : undefined
-          }
-        ])
-      )
-      const ordered = orderedKeys.map((key) => byKey.get(key)).filter(Boolean) as BreakdownRow[]
-      const rest = [...byKey.values()].filter((row) => !orderedKeys.includes(row.key))
-      return [...ordered, ...rest].map((row) => ({
-        label: row.label || row.key,
-        score: row.score,
-        note: typeof row.value === 'number' ? `生値=${row.value.toFixed(4)}` : undefined
-      }))
-    })()
+  })
   return {
     ...fallback,
     governanceScore,
+    oversharingScore: oversharing,
     coverageScore,
     confidenceLevel,
     confidenceScore,
-    riskSummary,
-    components: [
-      {
-        key: 'oversharing-control',
-        label: '過剰共有の抑制',
-        score: oversharing,
-        details: toDetails(breakdown?.oversharing_control, fallbackOversharingRows, oversharingOrder)
-      },
-      {
-        key: 'assurance',
-        label: '運用・保証',
-        score: assurance,
-        details: toDetails(breakdown?.assurance, fallbackAssuranceRows, assuranceOrder)
-      }
-    ],
-    coverageBreakdown: [
-      { key: 'inventory', label: 'コンテナ網羅率', value: Number(overview.coverage?.inventory_coverage ?? 0) },
-      { key: 'content_scan', label: 'コンテンツスキャン率', value: Number(overview.coverage?.content_scan_coverage ?? 0) },
-      { key: 'supported_format', label: '対応形式率', value: Number(overview.coverage?.supported_format_coverage ?? 0) },
-      { key: 'fresh_scan', label: '再スキャン鮮度', value: Number(overview.coverage?.fresh_scan_coverage ?? 0) },
-      { key: 'permission_detail', label: 'ACL詳細率', value: Number(overview.coverage?.permission_detail_coverage ?? 0) }
-    ]
+    components: incidentComponents
   }
 }
 
@@ -1017,7 +1075,7 @@ const OverviewPage = ({
           <CardHeader className="pb-2">
             <CardTitle>ガバナンス リスクダッシュボード</CardTitle>
             <CardDescription>
-              ガバナンススコア / Coverage / Confidence と v1.2 の3層サブスコアを表示します。
+              総合スコアは公開リンク・外部ドメイン・社内過剰共有の件数ベース指標から算出します（Coverage / Confidence は従来どおり）。
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3 md:grid-cols-3">
@@ -1102,30 +1160,21 @@ const OverviewPage = ({
     })()}
 
     <ReadinessBreakdownD3
-      overallScore={protectionViewModel.governanceScore}
+      overallScore={protectionViewModel.oversharingScore}
       targetScore={90}
       components={protectionViewModel.components}
       weakestPosition="bottom"
-      summaryCards={[
-        {
-          key: 'oversharing-control',
-          label: '過剰共有の抑制',
-          score: protectionViewModel.components.find((component) => component.key === 'oversharing-control')?.score ?? 0,
-          target: 90,
-          details: protectionViewModel.components.find((component) => component.key === 'oversharing-control')?.details ?? []
-        },
-        {
-          key: 'assurance',
-          label: '運用・保証',
-          score: protectionViewModel.components.find((component) => component.key === 'assurance')?.score ?? 0,
-          target: 90,
-          details: protectionViewModel.components.find((component) => component.key === 'assurance')?.details ?? []
-        }
-      ]}
-      title="ガバナンススコア（v1.2）"
-      description="raw_residual_risk を基準に算出された 3層サブスコアを表示します。"
-      rootLabel="ガバナンススコア"
-      scoreLabel="総合スコア"
+      summaryCards={protectionViewModel.components.map((component) => ({
+        key: component.key,
+        label: component.label,
+        score: component.score,
+        target: 90,
+        details: component.details
+      }))}
+      title="過剰共有の抑制"
+      description="公開リンク事故・外部ドメイン共有事故・社内過剰共有事故の3軸でスコアを表示します。Finding は優先順位（公開リンク→外部ドメイン→社内過剰）で分類し件数から算出します。"
+      rootLabel="過剰共有の抑制"
+      scoreLabel="過剰共有スコア"
       targetLabel="目標スコア"
       valueUnit=""
       maxScaleValue={protectionViewModel.scaleMax}
@@ -1133,48 +1182,6 @@ const OverviewPage = ({
       showComposition={false}
       showPriorityList={false}
     />
-
-    <Card>
-      <CardHeader>
-        <CardTitle>リスクサマリ</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-3 md:grid-cols-3">
-        {[
-          { label: '実リスク度', value: protectionViewModel.riskSummary.governanceRaw },
-          { label: '例外負債', value: protectionViewModel.riskSummary.exceptionDebt },
-          { label: 'カバレッジ不足', value: protectionViewModel.riskSummary.coveragePenalty }
-        ].map((item) => (
-          <div key={item.label} className="rounded-md border p-3">
-            <p className="text-xs text-muted-foreground">{item.label}</p>
-            <p className="mt-1 text-lg font-semibold">{item.value.toFixed(2)}</p>
-            <div className="mt-2 h-2 rounded-full bg-muted">
-              <div className="h-2 rounded-full bg-primary" style={{ width: `${Math.min(100, Math.max(0, item.value * 100))}%` }} />
-            </div>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-
-    <Card>
-      <CardHeader>
-        <CardTitle>Coverage 内訳</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="grid gap-2 md:grid-cols-2">
-          {protectionViewModel.coverageBreakdown.map((row) => (
-            <div key={row.key} className="rounded-md border p-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm">{row.label}</span>
-                <span className="text-sm font-medium">{Math.round(row.value * 100)}%</span>
-              </div>
-              <div className="mt-1 h-1.5 rounded-full bg-muted">
-                <div className="h-1.5 rounded-full bg-emerald-500" style={{ width: `${Math.min(100, Math.max(0, row.value * 100))}%` }} />
-              </div>
-            </div>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
 
   </div>
 )
@@ -1239,6 +1246,9 @@ const FindingsPage = ({
   const [isActionDialogOpen, setIsActionDialogOpen] = useState(false)
   const [isEvidencePanelOpen, setIsEvidencePanelOpen] = useState(false)
   const [remediationDetail, setRemediationDetail] = useState<GovernanceRemediationDetailResponse | null>(null)
+  /** 開いた直後の GET と承認/実行などのミューテーションの競合で、遅れた GET が新しい詳細を上書きしないようにする */
+  const remediationDetailFetchGenRef = useRef(0)
+  const remediationLoadAbortRef = useRef<AbortController | null>(null)
   const [remediationBusy, setRemediationBusy] = useState(false)
   const [exceptionType, setExceptionType] = useState<GovernanceExceptionRegistrationRequest['exception_type']>('temporary_accept')
   const [exceptionInputMode, setExceptionInputMode] = useState<'duration' | 'datetime'>('duration')
@@ -1261,9 +1271,10 @@ const FindingsPage = ({
         const response = await getGovernanceFindings(
           pageSize,
           nextOffset,
-          'new,open,completed,remediated,closed,acknowledged',
+          'new,open,in_progress,completed,remediated,closed,acknowledged',
           true,
-          false
+          false,
+          true
         )
         rows.push(...response.rows)
         totalCount = response.pagination?.total_count ?? rows.length
@@ -1333,16 +1344,30 @@ const FindingsPage = ({
     setExceptionReviewDueAt(buildDefaultExceptionReviewDueAt())
   }, [exceptionInputMode, exceptionReviewDueAt])
   useEffect(() => {
-    if (!isActionDialogOpen || !selectedFindingId) return
+    if (!isActionDialogOpen || !selectedFindingId) {
+      remediationLoadAbortRef.current?.abort()
+      remediationLoadAbortRef.current = null
+      return
+    }
+    remediationLoadAbortRef.current?.abort()
+    const ac = new AbortController()
+    remediationLoadAbortRef.current = ac
+    const gen = ++remediationDetailFetchGenRef.current
     const loadRemediation = async () => {
       try {
-        const detail = await getGovernanceFindingRemediation(selectedFindingId)
+        const detail = await getGovernanceFindingRemediation(selectedFindingId, { signal: ac.signal })
+        if (gen !== remediationDetailFetchGenRef.current) return
         setRemediationDetail(detail)
       } catch {
+        if (ac.signal.aborted) return
+        if (gen !== remediationDetailFetchGenRef.current) return
         setRemediationDetail(null)
       }
     }
     void loadRemediation()
+    return () => {
+      ac.abort()
+    }
   }, [isActionDialogOpen, selectedFindingId])
   useEffect(() => {
     setIsManualModeRollbackConfirmOpen(false)
@@ -1360,8 +1385,11 @@ const FindingsPage = ({
   const selectedRiskLevel = selectedFinding ? resolveFindingRiskLevel(selectedFinding) : 'low'
   const isLowRiskFinding = selectedRiskLevel === 'low'
   const selectedJob = selectedFinding ? relatedJobForFinding(selectedFinding.id, scanJobs) : null
-  const effectiveRemediationState = remediationDetail?.remediation_state ?? selectedFinding?.remediationState
-  const normalizedRemediationState = (effectiveRemediationState ?? 'ai_proposed') as RemediationState
+  const effectiveRemediationState =
+    remediationDetailState(remediationDetail) ?? selectedFinding?.remediationState
+  const normalizedRemediationState = String(effectiveRemediationState ?? 'ai_proposed')
+    .trim()
+    .toLowerCase() as RemediationState
   const isExecutedFinding = normalizedRemediationState === 'executed'
   const isPostRemediationState =
     normalizedRemediationState === 'executed' ||
@@ -1386,7 +1414,7 @@ const FindingsPage = ({
   const isApprovedState = normalizedRemediationState === 'approved'
   const isFailedState = normalizedRemediationState === 'failed'
   const effectiveRemediationMode = String(
-    remediationDetail?.remediation_mode ?? selectedFinding?.remediationMode ?? ''
+    remediationDetailMode(remediationDetail) ?? selectedFinding?.remediationMode ?? ''
   ).trim().toLowerCase()
   const isManualOnlyRemediationMode = ['manual', 'owner_review', 'recommend_only'].includes(effectiveRemediationMode)
   const isRollbackEligibleState = normalizedRemediationState === 'executed'
@@ -1417,6 +1445,41 @@ const FindingsPage = ({
     () => (selectedFinding ? remediationManualChecklist(remediationDetail, selectedFinding) : []),
     [remediationDetail, selectedFinding]
   )
+  const manualTechnicalDiagnostics = useMemo(
+    () => buildRemediationTechnicalDiagnostics(remediationDetail, selectedFinding ?? null),
+    [remediationDetail, selectedFinding]
+  )
+  const friendlyManualReasonBullets = useMemo(() => {
+    const texts = manualReasonCodes.map((code) => remediationManualReasonText(code).trim()).filter(Boolean)
+    return Array.from(new Set(texts))
+  }, [manualReasonCodes])
+  const manualRequiredExecutionSteps = useMemo(
+    () => executionRows.filter((row) => resultRowStatus(row) === 'manual_required'),
+    [executionRows]
+  )
+  const friendlyManualStepBullets = useMemo(
+    () =>
+      Array.from(
+        new Set(manualRequiredExecutionSteps.map((row) => friendlyManualRequiredStepSummary(row)))
+      ),
+    [manualRequiredExecutionSteps]
+  )
+  const remediationPlanHasRemovePermissions = useMemo(
+    () => remediationDetailPlanHasRemovePermissions(remediationDetail),
+    [remediationDetail]
+  )
+  const graphPermissionDeletesComplete = useMemo(
+    () => graphPermissionDeletionResultsComplete(remediationDetail),
+    [remediationDetail]
+  )
+  const showGraphCompleteManualFollowup =
+    normalizedRemediationState === 'manual_required'
+    && graphPermissionDeletesComplete
+    && !isManualOnlyRemediationMode
+  const showManualRequiredWithoutGraphRemovals =
+    normalizedRemediationState === 'manual_required'
+    && !remediationPlanHasRemovePermissions
+    && !isManualOnlyRemediationMode
 
   const handleApproveRemediation = useCallback(async () => {
     if (!selectedFinding) return
@@ -1426,13 +1489,56 @@ const FindingsPage = ({
     }
     setRemediationBusy(true)
     try {
-      const detail = await approveGovernanceFindingRemediation(selectedFinding.id)
+      remediationLoadAbortRef.current?.abort()
+      remediationDetailFetchGenRef.current += 1
+      let detail = await approveGovernanceFindingRemediation(selectedFinding.id)
+      appendRemediationClientDebug('after_approve_api', {
+        finding_id: selectedFinding.id,
+        state: remediationDetailState(detail),
+        auto_execute_skipped: detail.auto_execute_skipped ?? null,
+      })
+      const skippedAuto = Boolean(detail.auto_execute_skipped)
+      const modeAfterApprove = String(detail.remediation_mode ?? '').toLowerCase()
+      const manualLikeAfterApprove = ['manual', 'owner_review', 'recommend_only'].includes(
+        modeAfterApprove
+      )
+      const stateAfterApprove = String(remediationDetailState(detail) ?? '').trim().toLowerCase()
+      if (
+        stateAfterApprove === 'approved'
+        && !skippedAuto
+        && !manualLikeAfterApprove
+      ) {
+        try {
+          detail = await executeGovernanceFindingRemediation(selectedFinding.id)
+          appendRemediationClientDebug('after_execute_api', {
+            finding_id: selectedFinding.id,
+            state: remediationDetailState(detail),
+          })
+        } catch (execErr) {
+          toast.error(
+            execErr instanceof Error
+              ? execErr.message
+              : '是正の実行に失敗しました。承認は保存済みです。詳細の「実行」から再試行できます。'
+          )
+          setRemediationDetail(detail)
+          await loadFindings()
+          return
+        }
+      }
       setRemediationDetail(detail)
+      appendRemediationClientDebug('before_load_findings_after_mutation', {
+        finding_id: selectedFinding.id,
+        state: remediationDetailState(detail),
+      })
       await loadFindings()
-      if (detail.remediation_state === 'executed') {
-        toast.success('是正提案を承認し、是正処理を実行しました。')
-      } else if (detail.remediation_state === 'manual_required') {
-        toast('是正提案を承認し、是正処理を実行しました。一部は手動対応が必要です。')
+      if (remediationDetailState(detail) === 'executed') {
+        toast.success(
+          '是正提案を承認し、是正処理を実行しました。再スコアでリスクが low になると完了になります。'
+        )
+      } else if (remediationDetailState(detail) === 'manual_required') {
+        toast(
+          '是正提案を承認し、是正処理を実行しました。一部は手動対応が必要です。再スコアで low になると完了になります。'
+        )
       } else {
         toast.success('是正提案を承認しました。')
       }
@@ -1447,10 +1553,12 @@ const FindingsPage = ({
     if (!selectedFinding) return
     setRemediationBusy(true)
     try {
+      remediationLoadAbortRef.current?.abort()
+      remediationDetailFetchGenRef.current += 1
       const detail = await rollbackGovernanceFindingRemediation(selectedFinding.id)
       setRemediationDetail(detail)
       await loadFindings()
-      if (detail.remediation_state === 'manual_required') {
+      if (remediationDetailState(detail) === 'manual_required') {
         toast('ロールバックを実行しました。一部は手動対応が必要です。')
       } else {
         toast.success('ロールバックを実行しました。')
@@ -1463,9 +1571,7 @@ const FindingsPage = ({
   }, [selectedFinding, loadFindings])
 
   const manualRollbackDryRunSummary = useMemo(() => {
-    const n = Array.isArray(remediationDetail?.result?.results)
-      ? remediationDetail.result.results.length
-      : 0
+    const n = executionResultRows(remediationDetail).length
     return `手動対応モード: 実行済み結果 ${n} 件を対象にロールバックを試みます`
   }, [remediationDetail])
   const manualRollbackPredictedImpact = useMemo(
@@ -1503,6 +1609,8 @@ const FindingsPage = ({
     }
     setRemediationBusy(true)
     try {
+      remediationLoadAbortRef.current?.abort()
+      remediationDetailFetchGenRef.current += 1
       const detail = await registerGovernanceFindingException(selectedFinding.id, {
         exception_type: exceptionType,
         duration_days: normalizedDurationDays,
@@ -1541,6 +1649,8 @@ const FindingsPage = ({
     }
     setRemediationBusy(true)
     try {
+      remediationLoadAbortRef.current?.abort()
+      remediationDetailFetchGenRef.current += 1
       const detail = await markGovernanceFindingCompleted(selectedFinding.id)
       setRemediationDetail(detail)
       await loadFindings()
@@ -1633,7 +1743,6 @@ const FindingsPage = ({
                 <TableHead title="ステータスです。">status</TableHead>
                 <TableHead title="検知対象がファイルかフォルダかを示します。">対象種別</TableHead>
                 <TableHead title="A/B/C/Dなどの検知理由です。">検知理由</TableHead>
-                <TableHead title="ガードに紐づく理由コードです。">ガード理由</TableHead>
                 <TableHead title="最終評価日時です。">最終評価日時</TableHead>
               </TableRow>
             </TableHeader>
@@ -1696,17 +1805,6 @@ const FindingsPage = ({
                         ? (row.detectionReasons ?? []).map((reason) => (
                           <Badge key={`${row.id}-dr-${reason}`} variant="outline">
                             {DETECTION_REASON_LABELS[reason] ?? reason}
-                          </Badge>
-                        ))
-                        : <span className="text-xs text-muted-foreground">-</span>}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {(row.guardReasonCodes ?? []).length > 0
-                        ? (row.guardReasonCodes ?? []).map((reason) => (
-                          <Badge key={`${row.id}-gr-${reason}`} variant="outline">
-                            {GUARD_REASON_LABELS[reason] ?? reason}
                           </Badge>
                         ))
                         : <span className="text-xs text-muted-foreground">-</span>}
@@ -1776,12 +1874,6 @@ const FindingsPage = ({
                             .map((reason) => DETECTION_REASON_LABELS[reason] ?? reason)
                             .join(', ') || '-'
                         },
-                        {
-                          key: 'ガード理由',
-                          value: (selectedFinding.guardReasonCodes ?? [])
-                            .map((reason) => GUARD_REASON_LABELS[reason] ?? reason)
-                            .join(', ') || '-'
-                        },
                         { key: '最終実行ID', value: remediationDetail?.last_execution_id ?? '-' },
                         { key: '最終ロールバックID', value: remediationDetail?.rollback_id ?? '-' },
                         { key: '承認者', value: remediationDetail?.approved_by ?? '-' },
@@ -1820,18 +1912,24 @@ const FindingsPage = ({
                       {executionRows.length > 0 && (
                         <div className="mt-3 rounded-md border bg-background p-3">
                           <p className="text-xs text-muted-foreground">
-                            {String(remediationDetail?.result?.phase ?? '') === 'rollback'
+                            {remediationResultPhase(remediationDetail) === 'rollback'
                               ? 'ロールバック結果'
                               : '是正アクション実行結果'}
                           </p>
                           <div className="mt-2 space-y-1 text-xs">
-                            {executionRows.map((row, index) => (
-                              <p key={`${row.action_id ?? 'action'}-${index}`}>
-                                {String(row.action_type ?? '-')} / {String(row.status ?? '-')}
-                                {row.permission_id ? ` (permission_id: ${String(row.permission_id)})` : ''}
-                                {row.reason ? ` / reason: ${String(row.reason)}` : ''}
-                              </p>
-                            ))}
+                            {executionRows.map((row, index) => {
+                              const rec = row as Record<string, unknown>
+                              const aid = pickStr(rec, 'action_id', 'actionId')
+                              const pid = resultRowPermissionId(rec)
+                              const reasonText = String(rec.reason ?? '').trim()
+                              return (
+                                <p key={`${aid || 'action'}-${index}`}>
+                                  {resultRowActionType(rec) || '-'} / {resultRowStatus(rec) || '-'}
+                                  {pid ? ` (permission_id: ${pid})` : ''}
+                                  {reasonText ? ` / reason: ${reasonText}` : ''}
+                                </p>
+                              )
+                            })}
                           </div>
                         </div>
                       )}
@@ -2154,23 +2252,126 @@ const FindingsPage = ({
                       )}
                       {!isLowRiskFinding && (normalizedRemediationState === 'manual_required' || isManualOnlyRemediationMode) && (
                         <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
-                          <p className="text-xs text-amber-700">手動対応が必要な理由</p>
-                          <p className="mt-1 text-amber-900">
-                            この検知では自動適用可能な是正が限定的なため、運用者による確認/対応が必要です。
-                          </p>
-                          {manualReasonCodes.length > 0 && (
-                            <div className="mt-2 rounded-md border border-amber-300 bg-amber-100 p-2">
-                              <p className="text-xs font-medium text-amber-900">手動対応へ縮退した理由コード（コスト制御含む）</p>
-                              <div className="mt-1 space-y-1 text-xs text-amber-900">
-                                {manualReasonCodes.map((code) => (
-                                  <p key={code}>- {code}: {remediationManualReasonText(code)}</p>
+                          {showGraphCompleteManualFollowup ? (
+                            <>
+                              <p className="text-xs font-medium text-amber-800">
+                                共有権限の是正は Microsoft Graph 経由で完了しています
+                              </p>
+                              <p className="mt-1 text-sm text-amber-950">
+                                実行ログ上、権限削除（または対象なし）はすべて反映済みです。状態が
+                                manual_required と表示されるのは、感度ラベル付与など Graph
+                                以外の付随ステップが残っているためです。下のチェックリストの残りのみ対応してください。
+                              </p>
+                            </>
+                          ) : showManualRequiredWithoutGraphRemovals ? (
+                            <>
+                              <p className="text-xs font-medium text-amber-800">手動での確認が必要です</p>
+                              <p className="mt-1 text-sm text-amber-950">
+                                この計画には Microsoft Graph
+                                による共有権限の自動削除が含まれていません（または削除対象がありませんでした）。是正状態が
+                                manual_required
+                                なのは、ラベル付与やレビューなど別の手順が残っているためです。チェックリストに沿って
+                                Microsoft 365 で対応してください。
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs font-medium text-amber-800">手動での確認が必要です</p>
+                              <p className="mt-1 text-sm text-amber-950">
+                                この検知は、ルール上すべてを自動では完了できない状態です。下のチェックリストに沿って、Microsoft
+                                365 の共有設定を確認し、必要な変更を行ってください。
+                              </p>
+                            </>
+                          )}
+                          {friendlyManualReasonBullets.length > 0 && (
+                            <div className="mt-3 rounded-md border border-amber-200 bg-amber-100/70 p-2">
+                              <p className="text-xs font-medium text-amber-900">補足</p>
+                              <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-950">
+                                {friendlyManualReasonBullets.map((text) => (
+                                  <li key={text}>{text}</li>
                                 ))}
-                              </div>
+                              </ul>
                             </div>
                           )}
-                          <div className="mt-2 space-y-1 text-xs text-amber-900">
+                          {friendlyManualStepBullets.length > 0 && (
+                            <div className="mt-3 rounded-md border border-amber-200 bg-amber-100/70 p-2">
+                              <p className="text-xs font-medium text-amber-900">システムからのメッセージ</p>
+                              <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-950">
+                                {friendlyManualStepBullets.map((text) => (
+                                  <li key={text}>{text}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          {friendlyManualReasonBullets.length === 0 &&
+                            friendlyManualStepBullets.length === 0 &&
+                            normalizedRemediationState === 'manual_required' && (
+                            <p className="mt-2 text-xs text-amber-900">
+                              追加の説明文はありません。チェックリストに従い対応してください。不明な点は情報システム担当へ問い合わせてください。
+                            </p>
+                          )}
+                          <details className="mt-3 rounded-md border border-amber-300/60 bg-white/50 p-2 text-xs text-muted-foreground">
+                            <summary className="cursor-pointer select-none font-medium text-amber-900/90">
+                              管理者・サポート向け（技術情報）
+                            </summary>
+                            <div className="mt-2 space-y-2 border-t border-amber-200/80 pt-2 text-[11px] leading-relaxed text-amber-950">
+                              {manualReasonCodes.length > 0 ? (
+                                <div>
+                                  <p className="font-medium text-amber-900">内部理由コード</p>
+                                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                                    {manualReasonCodes.map((code) => (
+                                      <li key={code}>
+                                        <span className="font-mono text-[10px]">{code}</span>
+                                        {' — '}
+                                        {remediationManualReasonText(code)}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : (
+                                normalizedRemediationState === 'manual_required' && (
+                                  <p>
+                                    実行ログに reason_code がありません。バックエンドが未更新の可能性があります（デプロイ後は記録されます）。
+                                  </p>
+                                )
+                              )}
+                              {manualTechnicalDiagnostics.length > 0 && (
+                                <div>
+                                  <p className="font-medium text-amber-900">診断メモ</p>
+                                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                                    {manualTechnicalDiagnostics.map((hint) => (
+                                      <li key={hint}>{hint}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {manualRequiredExecutionSteps.length > 0 && (
+                                <div>
+                                  <p className="font-medium text-amber-900">実行ログ行（result.results）</p>
+                                  <div className="mt-1 space-y-1.5">
+                                    {manualRequiredExecutionSteps.map((row, idx) => {
+                                      const rec = row as Record<string, unknown>
+                                      const at = resultRowActionType(rec) || '-'
+                                      const rc = pickStr(rec, 'reason_code', 'reasonCode')
+                                      const msg = String(rec.reason ?? '').trim()
+                                      const key = `${at}-${rc}-${idx}`
+                                      return (
+                                        <div key={key} className="rounded border border-amber-100 bg-amber-50/50 p-1.5 font-mono text-[10px]">
+                                          <p>action_type={at}</p>
+                                          {rc ? <p>reason_code={rc}</p> : null}
+                                          {msg ? <p className="mt-0.5 whitespace-pre-wrap font-sans text-[11px]">{msg}</p> : null}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                          <div className="mt-3 space-y-1 text-xs text-amber-950">
+                            <p className="font-medium text-amber-900">次に行うこと</p>
                             {manualChecklist.map((item) => (
-                              <p key={item}>- {item}</p>
+                              <p key={item}>・{item}</p>
                             ))}
                           </div>
                         </div>
@@ -4210,7 +4411,11 @@ export default function GovernanceOperations() {
     let offset = 0
     const limit = 500
     for (let i = 0; i < 20; i += 1) {
-      const response = await getGovernanceFindings(limit, offset, 'new,open,acknowledged,closed')
+      const response = await getGovernanceFindings(
+        limit,
+        offset,
+        'new,open,in_progress,completed,remediated,acknowledged,closed'
+      )
       rows.push(...response.rows)
       const nextOffset = response.pagination?.next_offset
       if (typeof nextOffset === 'number' && nextOffset >= 0) {

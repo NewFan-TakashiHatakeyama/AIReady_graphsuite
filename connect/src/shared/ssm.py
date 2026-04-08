@@ -13,6 +13,9 @@ import boto3
 from botocore.exceptions import ClientError
 
 from src.shared.config import get_config
+from src.shared.connect_secrets import get_connection_client_secret
+from src.shared.connection_lookup import fetch_connection_item
+from src.shared.customer_credentials import try_resolve_customer_graph_credentials
 
 
 def _client():
@@ -117,6 +120,17 @@ def tenant_param_name(tenant_id: str, key: str) -> str:
     return f"/aiready/connect/{normalized_tenant_id}/{key}"
 
 
+def _connection_item_value_for_param(item: dict[str, str] | None, key: str) -> str:
+    """Map SSM param keys to DynamoDB connection attributes."""
+    if not item:
+        return ""
+    if key == "tenant_id":
+        return str(item.get("graph_tenant_id") or "").strip()
+    if key == "client_id":
+        return str(item.get("graph_client_id") or "").strip()
+    return str(item.get(key) or "").strip()
+
+
 def tenant_connection_param_name(tenant_id: str, connection_id: str, key: str) -> str:
     """テナント + 接続単位の SSM パラメータ名を構築する。
 
@@ -140,13 +154,16 @@ def resolve_connect_param(
     connection_id: str = "",
     decrypt: bool = True,
     fallback_name: str = "",
+    _connection_item: dict[str, str] | None = None,
 ) -> str:
     """接続スコープのパラメータを後方互換付きで解決する。
 
     解決順序:
-    1. `/aiready/connect/{tenant_id}/{connection_id}/{key}`
-    2. `/aiready/connect/{tenant_id}/{key}`
-    3. `fallback_name`（従来キー）
+    1. DynamoDB 接続行（CONNECT_ONBOARDING_OMIT_CONNECTION_SSM 運用時の主ソース）
+    2. Secrets Manager の接続 client_secret（key == client_secret のみ）
+    3. `/aiready/connect/{tenant_id}/{connection_id}/{key}`
+    4. `/aiready/connect/{tenant_id}/{key}`
+    5. `fallback_name`（従来キー）
 
     Args:
         key: 解決対象のパラメータキー
@@ -154,12 +171,31 @@ def resolve_connect_param(
         connection_id: 接続識別子
         decrypt: SecureString を復号するか
         fallback_name: 最終フォールバックする従来キー名
+        _connection_item: 同一呼び出し内で fetch 済みの行（任意）
 
     Returns:
         解決できたパラメータ値。未解決時は空文字
     """
     normalized_tenant_id = str(tenant_id or "").strip()
     normalized_connection_id = str(connection_id or "").strip()
+
+    if key == "client_secret" and normalized_tenant_id and normalized_connection_id:
+        from_sm = get_connection_client_secret(
+            tenant_id=normalized_tenant_id, connection_id=normalized_connection_id
+        )
+        if from_sm:
+            return from_sm
+
+    row = _connection_item
+    if row is None and normalized_tenant_id and normalized_connection_id:
+        row = fetch_connection_item(
+            tenant_id=normalized_tenant_id, connection_id=normalized_connection_id
+        )
+    if row:
+        from_row = _connection_item_value_for_param(row, key)
+        if from_row:
+            return from_row
+
     if normalized_tenant_id and normalized_connection_id:
         scoped = get_param_optional(
             tenant_connection_param_name(normalized_tenant_id, normalized_connection_id, key),
@@ -261,61 +297,74 @@ def get_graph_credentials_scoped(
     cfg = get_config()
     normalized_tenant_id = str(tenant_id or cfg.tenant_id).strip()
     normalized_connection_id = str(connection_id or "").strip()
+
+    cust = try_resolve_customer_graph_credentials(tenant_id=normalized_tenant_id)
+    if cust:
+        azure_tenant_id, graph_client_id, graph_client_secret = cust
+        row = (
+            fetch_connection_item(
+                tenant_id=normalized_tenant_id, connection_id=normalized_connection_id
+            )
+            if normalized_connection_id
+            else None
+        )
+
+        def _resolve(
+            k: str,
+            *,
+            decrypt: bool = True,
+            fallback_name: str = "",
+        ) -> str:
+            return resolve_connect_param(
+                k,
+                tenant_id=normalized_tenant_id,
+                connection_id=normalized_connection_id,
+                decrypt=decrypt,
+                fallback_name=fallback_name,
+                _connection_item=row,
+            )
+
+        return {
+            "client_id": graph_client_id,
+            "tenant_id": azure_tenant_id,
+            "client_secret": graph_client_secret,
+            "access_token": _resolve("access_token", fallback_name=cfg.ssm_access_token),
+            "drive_id": _resolve("drive_id", decrypt=False, fallback_name=cfg.ssm_drive_id),
+            "client_state": _resolve("client_state", fallback_name=cfg.ssm_client_state),
+            "notification_url": _resolve("notification_url", decrypt=False, fallback_name=""),
+            "site_id": _resolve("site_id", decrypt=False, fallback_name=""),
+        }
+
+    row = (
+        fetch_connection_item(
+            tenant_id=normalized_tenant_id, connection_id=normalized_connection_id
+        )
+        if normalized_connection_id
+        else None
+    )
+
+    def _resolve(
+        k: str,
+        *,
+        decrypt: bool = True,
+        fallback_name: str = "",
+    ) -> str:
+        return resolve_connect_param(
+            k,
+            tenant_id=normalized_tenant_id,
+            connection_id=normalized_connection_id,
+            decrypt=decrypt,
+            fallback_name=fallback_name,
+            _connection_item=row,
+        )
+
     return {
-        "client_id": resolve_connect_param(
-            "client_id",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=False,
-            fallback_name=cfg.ssm_client_id,
-        ),
-        "tenant_id": resolve_connect_param(
-            "tenant_id",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=False,
-            fallback_name=cfg.ssm_tenant_id,
-        ),
-        "client_secret": resolve_connect_param(
-            "client_secret",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=True,
-            fallback_name=cfg.ssm_client_secret,
-        ),
-        "access_token": resolve_connect_param(
-            "access_token",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=True,
-            fallback_name=cfg.ssm_access_token,
-        ),
-        "drive_id": resolve_connect_param(
-            "drive_id",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=False,
-            fallback_name=cfg.ssm_drive_id,
-        ),
-        "client_state": resolve_connect_param(
-            "client_state",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=True,
-            fallback_name=cfg.ssm_client_state,
-        ),
-        "notification_url": resolve_connect_param(
-            "notification_url",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=False,
-            fallback_name="",
-        ),
-        "site_id": resolve_connect_param(
-            "site_id",
-            tenant_id=normalized_tenant_id,
-            connection_id=normalized_connection_id,
-            decrypt=False,
-            fallback_name="",
-        ),
+        "client_id": _resolve("client_id", decrypt=False, fallback_name=cfg.ssm_client_id),
+        "tenant_id": _resolve("tenant_id", decrypt=False, fallback_name=cfg.ssm_tenant_id),
+        "client_secret": _resolve("client_secret", fallback_name=cfg.ssm_client_secret),
+        "access_token": _resolve("access_token", fallback_name=cfg.ssm_access_token),
+        "drive_id": _resolve("drive_id", decrypt=False, fallback_name=cfg.ssm_drive_id),
+        "client_state": _resolve("client_state", fallback_name=cfg.ssm_client_state),
+        "notification_url": _resolve("notification_url", decrypt=False, fallback_name=""),
+        "site_id": _resolve("site_id", decrypt=False, fallback_name=""),
     }

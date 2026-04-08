@@ -44,6 +44,10 @@ def get_secretsmanager_client(config: AwsRuntimeConfig):
     return get_aws_session(config).client("secretsmanager")
 
 
+def get_sts_client(config: AwsRuntimeConfig):
+    return get_aws_session(config).client("sts")
+
+
 def get_sns_client(config: AwsRuntimeConfig):
     return get_aws_session(config).client("sns")
 

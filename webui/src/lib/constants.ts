@@ -1,6 +1,11 @@
 import { ButtonVariantType } from '@/components/ui/Button'
 
-export const backendBaseUrl = import.meta.env.VITE_BACKEND_URL || ''
+/** When run.ps1 sets VITE_USE_VITE_PROXY=1, axios uses relative URLs so the Vite proxy hits the local API (.env VITE_BACKEND_URL is ignored). */
+const useViteProxy =
+  import.meta.env.VITE_USE_VITE_PROXY === 'true' ||
+  import.meta.env.VITE_USE_VITE_PROXY === '1'
+
+export const backendBaseUrl = useViteProxy ? '' : import.meta.env.VITE_BACKEND_URL || ''
 export const webuiPrefix = '/'
 
 export const controlButtonVariant: ButtonVariantType = 'ghost'

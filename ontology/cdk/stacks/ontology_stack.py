@@ -297,6 +297,15 @@ class OntologyStack(Stack):
                 )
             )
 
+        # schemaTransform runs OntologyInferenceService (document profile, target, freshness) during ingest.
+        # Without this, Bedrock calls fail with AccessDenied and profiles fall back to heuristics.
+        schema_transform_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
+            )
+        )
+
         lineage_event_table.grant_read_write_data(lineage_recorder_role)
 
         entity_resolution_queue.grant_consume_messages(entity_resolver_role)
@@ -410,6 +419,8 @@ class OntologyStack(Stack):
                 "GOVERNANCE_FINDING_TABLE": self.governance_finding_table_name,
                 "DOCUMENT_ANALYSIS_TABLE": self.document_analysis_table_name,
                 "ONTOLOGY_TARGET_EXTENSIONS": ".doc,.docx,.xls,.xlsx,.xlsm,.ppt,.pptx,.pdf,.txt,.md,.csv,.rtf",
+                # llm_veto: Bedrock is_target が最終決定（既定）。rule_low_extension: 低リスク+対象拡張子+適格status で LLM バイパス。
+                "ONTOLOGY_CATALOG_INGEST_MODE": "llm_veto",
                 "LINEAGE_FUNCTION_NAME": lineage_recorder.function_name,
                 "TENANT_ID": self.tenant_id,
             },

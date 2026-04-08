@@ -174,6 +174,9 @@ class TestPT1Performance:
         assert elapsed < 60, f"Processing took too long: {elapsed:.1f}s"
 
     @pytest.mark.slow
+    @pytest.mark.skip(
+        reason="DocumentAnalysis は detectSensitivity 系パイプライン依存; hard-cut 後は生成経路が無い"
+    )
     def test_pt_1_07_phase65_document_analysis_latency(
         self, connect_table, finding_table, document_analysis_table, s3_client
     ):

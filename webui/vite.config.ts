@@ -18,8 +18,14 @@ export default defineConfig(({ mode }) => {
   const governanceProxyAgent = new http.Agent({ keepAlive: false })
   // Connect onboarding can take minutes (Graph + Lambda + reflection); avoid short defaults.
   const connectProxyAgent = new http.Agent({ keepAlive: false })
+  // run.ps1 sets VITE_USE_VITE_PROXY=1 in process.env; loadEnv does not always see the shell, so merge here.
+  const viteUseViteProxy =
+    process.env.VITE_USE_VITE_PROXY ?? env.VITE_USE_VITE_PROXY ?? ''
 
   return {
+    define: {
+      'import.meta.env.VITE_USE_VITE_PROXY': JSON.stringify(viteUseViteProxy),
+    },
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

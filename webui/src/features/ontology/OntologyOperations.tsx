@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { CalendarClock, Files, RefreshCw, UserCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import Badge, { BadgeProps } from '@/components/ui/Badge'
 import Button from '@/components/ui/Button'
+import Checkbox from '@/components/ui/Checkbox'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/Card'
 import {
   Dialog,
@@ -24,7 +25,6 @@ import { useGovernanceBatchScoringGate } from '@/features/common/useGovernanceBa
 import { cn } from '@/lib/utils'
 import { useGraphStore } from '@/stores/graph'
 import { useSettingsStore } from '@/stores/settings'
-import ReadinessBreakdownD3 from '@/features/governance/ReadinessBreakdownD3'
 import OntologyGraphView from './OntologyGraphView'
 import {
   ApiHttpError,
@@ -49,6 +49,8 @@ import {
   OntologyAuditRecord,
   OntologyOverviewStats,
   OntologyPageKey,
+  OntologyPillarDocumentCounts,
+  RemediationState,
   UnifiedMetadataRecord
 } from './types'
 
@@ -96,6 +98,8 @@ const ONTOLOGY_PAGE_GUIDE: Record<OntologyPageKey, string> = {
   'unified-metadata': 'ドキュメント単位で管理されたオントロジーグラフを確認します。',
   'entity-candidates': '文書から抽出された辞書未登録ワードを確認し、エンティティ統合を判断します。',
   'entity-master': '正規化済みエンティティマスタを確認し、近似推薦の参照元として利用します。',
+  lineage: 'データの由来と変換の履歴を確認します。',
+  'reconcile-jobs': '不整合の再計算・整備ジョブの状況を確認します。',
   audit: '運用操作の監査証跡を確認します。',
   help: 'オントロジーの操作手順と主要用語を確認します。'
 }
@@ -112,6 +116,8 @@ const ONTOLOGY_TAB_HELP: Record<OntologyPageKey, string> = {
   'unified-metadata': 'ドキュメント単位のオントロジーグラフ一覧を確認します。',
   'entity-candidates': '辞書未登録の候補と推薦候補を確認します。',
   'entity-master': '正規化済みエンティティマスタ（推薦の参照元）を確認します。',
+  lineage: 'データ系譜と変換履歴を確認します。',
+  'reconcile-jobs': '再整合ジョブの状態を確認します。',
   audit: '監査証跡を確認します。',
   help: '使い方と用語を確認します。'
 }
@@ -213,8 +219,6 @@ const INTENT_LABELS: Record<string, string> = {
   escalation_contact: 'エスカレーション先'
 }
 
-const toPercent = (value: number): number => Math.round(Math.max(0, Math.min(1, value)) * 100)
-
 const average = (values: number[]): number => {
   if (values.length === 0) return 0
   return values.reduce((sum, value) => sum + value, 0) / values.length
@@ -244,6 +248,36 @@ const toUiErrorMessage = (error: unknown, fallback: string): string => {
     return error.message
   }
   return fallback
+}
+
+const mapPillarDocumentCountsFromApi = (
+  raw: OntologyOverviewResponse['pillar_document_counts']
+): OntologyPillarDocumentCounts | undefined => {
+  if (!raw) return undefined
+  const by = raw.freshness?.by_status ?? {}
+  return {
+    denominator: Number(raw.denominator ?? 0),
+    freshness: {
+      byStatus: {
+        active: Number(by.active ?? 0),
+        aging: Number(by.aging ?? 0),
+        stale: Number(by.stale ?? 0),
+        other: Number(by.other ?? 0)
+      },
+      staleOrAging: Number(raw.freshness?.stale_or_aging ?? 0)
+    },
+    duplication: {
+      inDuplicateGroup: Number(raw.duplication?.in_duplicate_group ?? 0),
+      nonCanonicalDuplicateCopy: Number(raw.duplication?.non_canonical_duplicate_copy ?? 0),
+      canonicalOrNoDuplicateGroup: Number(raw.duplication?.canonical_or_no_duplicate_group ?? 0)
+    },
+    stewardship: {
+      meaningfulOwner: Number(raw.stewardship?.meaningful_owner ?? 0),
+      meaningfulProject: Number(raw.stewardship?.meaningful_project ?? 0),
+      meaningfulTopicCategories: Number(raw.stewardship?.meaningful_topic_categories ?? 0),
+      allThree: Number(raw.stewardship?.all_three ?? 0)
+    }
+  }
 }
 
 const toOverviewStatsFromApi = (
@@ -368,7 +402,9 @@ const toOverviewStatsFromApi = (
           label: String(item.label ?? INTENT_LABELS[String(item.intent_id)] ?? item.intent_id),
           score: Number(item.score ?? 0)
         }))
-        : intentBreakdown
+        : intentBreakdown,
+    pillarDocumentCounts: mapPillarDocumentCountsFromApi(row.pillar_document_counts),
+    ontologyScoreMode: row.ontology_score_mode === 'legacy' ? 'legacy' : 'count_based'
   }
 }
 
@@ -399,6 +435,11 @@ const toUnifiedMetadataFromApi = (row: OntologyUnifiedMetadataApiRow, index: num
     resolveOntologyDocumentName(row, String(row.item_id ?? `item-${index + 1}`))
   ),
   planId: String(row.plan_id ?? `plan-api-${index + 1}`),
+  remediationState: ((): RemediationState => {
+    const raw = (row as Record<string, unknown>).remediation_state
+    const allowed: RemediationState[] = ['ai_proposed', 'pending_approval', 'approved', 'executed']
+    return typeof raw === 'string' && (allowed as string[]).includes(raw) ? (raw as RemediationState) : 'executed'
+  })(),
   title: resolveOntologyDocumentName(row, String(row.item_id ?? `item-${index + 1}`)),
   contentType: String(row.content_type ?? 'application/octet-stream'),
   source: String(row.source ?? 'aws'),
@@ -456,6 +497,11 @@ const toUnifiedMetadataFromApi = (row: OntologyUnifiedMetadataApiRow, index: num
 const toEntityMasterFromApi = (row: OntologyEntityMasterApiRow, index: number) => ({
   entityId: String(row.entity_id ?? `ent-api-${index + 1}`),
   planId: `plan-api-${index + 1}`,
+  remediationState: ((): RemediationState => {
+    const raw = (row as Record<string, unknown>).remediation_state
+    const allowed: RemediationState[] = ['ai_proposed', 'pending_approval', 'approved', 'executed']
+    return typeof raw === 'string' && (allowed as string[]).includes(raw) ? (raw as RemediationState) : 'executed'
+  })(),
   canonicalValue: String(row.canonical_value ?? row.canonical_name ?? `entity-${index + 1}`),
   entityType: String(row.entity_type ?? 'entity'),
   piiFlag: Boolean(row.pii_flag ?? false),
@@ -480,7 +526,9 @@ const paginateRows = <T,>(rows: T[], page: number, pageSize: number): T[] =>
 
 // Unused legacy helpers removed (remediationStatusMessage, resolveLegacyPlanIdFromItemId)
 
-const fetchAllOntologyUnifiedMetadata = async (): Promise<{
+const fetchAllOntologyUnifiedMetadata = async (
+  onlyActiveConnectScopes: boolean = true
+): Promise<{
   rows: OntologyUnifiedMetadataApiRow[]
   totalCount: number
 }> => {
@@ -490,7 +538,7 @@ const fetchAllOntologyUnifiedMetadata = async (): Promise<{
   const rows: OntologyUnifiedMetadataApiRow[] = []
 
   while (true) {
-    const response = await getOntologyUnifiedMetadata(limit, offset)
+    const response = await getOntologyUnifiedMetadata(limit, offset, onlyActiveConnectScopes)
     if (totalCount === 0) {
       totalCount = response.pagination.total_count
     }
@@ -528,6 +576,22 @@ const fetchAllOntologyEntityMaster = async (): Promise<{
   return { rows, totalCount }
 }
 
+const PillarHintLabel = ({ label, hint }: { label: string; hint: string }) => (
+  <Tooltip>
+    <TooltipTrigger asChild>
+      <span
+        tabIndex={0}
+        className="cursor-help border-b border-dotted border-muted-foreground/60 text-foreground outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {label}
+      </span>
+    </TooltipTrigger>
+    <TooltipContent side="top" className="max-w-[280px] text-xs leading-relaxed">
+      {hint}
+    </TooltipContent>
+  </Tooltip>
+)
+
 const OverviewPage = ({
   onNavigate,
   overview,
@@ -537,41 +601,6 @@ const OverviewPage = ({
   overview: OntologyOverviewStats
   unresolvedDocumentProfileCount: number
 }) => {
-  const baseScore = Number(((overview.baseOntologyScore ?? 0) * 100).toFixed(1))
-  const useCaseScore = Number(((overview.useCaseReadiness ?? 0) * 100).toFixed(1))
-  const overallScore = Number(((overview.ontologyScore ?? 0) * 100).toFixed(1))
-  const freshnessSignalScore = Number(((overview.freshnessValidity ?? 0) * 100).toFixed(1))
-  const duplicationSignalScore = Number(((overview.canonicalityDuplication ?? 0) * 100).toFixed(1))
-  const locationSignalScore = Number(((overview.stewardshipFindability ?? 0) * 100).toFixed(1))
-  const intentScore = Number(((overview.intentCoverage ?? 0) * 100).toFixed(1))
-  const evidenceScore = Number(((overview.evidenceCoverage ?? 0) * 100).toFixed(1))
-  const freshnessFitScore = Number(((overview.freshnessFit ?? 0) * 100).toFixed(1))
-  const benchmarkScore = Number(((overview.benchmarkLite ?? 0) * 100).toFixed(1))
-
-  const ontologySignalComponents = [
-    {
-      key: 'base',
-      label: '情報整備スコア',
-      score: baseScore,
-      details: [
-        { label: '鮮度と有効期限', score: freshnessSignalScore },
-        { label: '重複の排除', score: duplicationSignalScore },
-        { label: '所在と所有者の明確化', score: locationSignalScore }
-      ]
-    },
-    {
-      key: 'usecase',
-      label: 'ユースケース解決力',
-      score: useCaseScore,
-      details: [
-        { label: 'Intent（論点網羅度）', score: intentScore },
-        { label: 'Evidence（根拠文書充実度）', score: evidenceScore },
-        { label: 'Freshness（情報鮮度適合度）', score: freshnessFitScore },
-        { label: 'Benchmark（想定質問対応度）', score: benchmarkScore }
-      ]
-    }
-  ]
-
   return (
     <div className="space-y-4">
       <Card className="border-primary/20 bg-primary/5">
@@ -613,50 +642,170 @@ const OverviewPage = ({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle>社内QA intent 別カバレッジ</CardTitle>
-          <CardDescription>低スコア intent を優先して改善対象を特定します。</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-2 md:grid-cols-2">
-          {(overview.intentBreakdown ?? []).length === 0 ? (
-            <p className="text-sm text-muted-foreground">intent カバレッジデータはまだありません。</p>
-          ) : (
-            (overview.intentBreakdown ?? []).map((intent) => (
-              <div key={intent.intentId} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                <span>{intent.label}</span>
-                <Badge variant={intent.score >= 0.7 ? 'outline' : intent.score >= 0.4 ? 'secondary' : 'destructive'}>
-                  {toPercent(intent.score)}
-                </Badge>
+      {overview.pillarDocumentCounts && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle>情報整備の3つのチェック（件数）</CardTitle>
+            <CardDescription className="space-y-1.5">
+              <span className="block">
+                鮮度・かぶり・管理情報の3点について、文書ごとの件数を並べています。加重スコアではなく、そのままの数です。
+              </span>
+              <span className="block text-muted-foreground">
+                対象は運用中の文書 {overview.pillarDocumentCounts.denominator} 件です（論理削除は含みません）。
+              </span>
+            </CardDescription>
+          </CardHeader>
+          <TooltipProvider delayDuration={200}>
+            <CardContent className="grid gap-4 md:grid-cols-3">
+              <div className="rounded-md border bg-muted/30 p-3 text-sm">
+                <p className="flex items-center gap-2 font-medium text-foreground">
+                  <CalendarClock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  鮮度と有効期限
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  更新が追いついているか、見直しが必要かを件数で見ます。
+                </p>
+                <dl className="mt-3 space-y-1.5 text-muted-foreground">
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="問題なし"
+                        hint="鮮度・有効期限の観点で、すぐ参照してよい状態として数えている文書です（システム上の active に相当）。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.freshness.byStatus.active}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="そろそろ要確認"
+                        hint="まだ「要対応」ではないものの、更新が遅れ始めているなど注意が必要な状態です（aging）。優先的に目を通すとよい文書の件数です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.freshness.byStatus.aging}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="更新・整合が必要"
+                        hint="鮮度や整合の面で手当てや再計算が必要な状態です（stale）。放置しないほうがよい文書の件数です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.freshness.byStatus.stale}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="その他"
+                        hint="上記の区分に当てはまらない鮮度ステータスの文書です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.freshness.byStatus.other}</dd>
+                  </div>
+                  <div className="mt-2 flex justify-between gap-2 rounded-md bg-muted/50 px-2 py-2 text-foreground">
+                    <dt className="min-w-0 font-medium">
+                      <PillarHintLabel
+                        label="まとめ：注意〜要対応の合計"
+                        hint="「そろそろ要確認」と「更新・整合が必要」の件数を足したものです。0 に近いほど鮮度面は安心です。"
+                      />
+                    </dt>
+                    <dd className="shrink-0 tabular-nums font-semibold">{overview.pillarDocumentCounts.freshness.staleOrAging}</dd>
+                  </div>
+                </dl>
               </div>
-            ))
-          )}
-        </CardContent>
-      </Card>
-
-      <ReadinessBreakdownD3
-        overallScore={overallScore}
-        targetScore={80}
-        components={ontologySignalComponents}
-        summaryCards={ontologySignalComponents.map((c) => ({
-          key: c.key,
-          label: c.label,
-          score: c.score,
-          target: 80,
-          details: c.details
-        }))}
-        title="オントロジー 5シグナル連動スコア（ユースケース統合）"
-        description="情報整備スコア / ユースケース解決力の2コンポーネントで表示します。クリックで内訳を確認できます。"
-        rootLabel="オントロジー シグナルスコア"
-        scoreLabel="オントロジー総合スコア"
-        targetLabel="目標スコア"
-        valueUnit=""
-        maxScaleValue={100}
-        weakestPosition="bottom"
-        showComponentChart={false}
-        showComposition={false}
-        showPriorityList={false}
-      />
+              <div className="rounded-md border bg-muted/30 p-3 text-sm">
+                <p className="flex items-center gap-2 font-medium text-foreground">
+                  <Files className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  重なり（重複）
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  同じ内容の文書が複数あるとき、公式の1本が決まっているかを件数で見ます。
+                </p>
+                <dl className="mt-3 space-y-1.5 text-muted-foreground">
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="同じ内容としてひも付いた件数"
+                        hint="システムが「中身が同じ」と判断し、ひとまとまりに関連付けている文書の件数です（重複グループに含まれる件数）。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.duplication.inDuplicateGroup}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="メイン以外の控え"
+                        hint="同じ内容のなかで、公式の1本（メイン）ではない側として数えている文書です。整理・統合の候補になりやすい件数です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">
+                      {overview.pillarDocumentCounts.duplication.nonCanonicalDuplicateCopy}
+                    </dd>
+                  </div>
+                  <div className="mt-2 flex justify-between gap-2 rounded-md bg-muted/50 px-2 py-2 text-foreground">
+                    <dt className="min-w-0 font-medium">
+                      <PillarHintLabel
+                        label="まとめ：メイン確定またはかぶりなし"
+                        hint="公式の1本が決まっている文書、またはそもそも同じ内容の別ファイルとみなされていない文書の件数です。母数に近いほど望ましいです。"
+                      />
+                    </dt>
+                    <dd className="shrink-0 tabular-nums font-semibold">
+                      {overview.pillarDocumentCounts.duplication.canonicalOrNoDuplicateGroup}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3 text-sm">
+                <p className="flex items-center gap-2 font-medium text-foreground">
+                  <UserCircle className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  管理情報（所在）
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  担当・案件・分類など、誰がどの文脈の文書かが分かる情報が入っているかを見ます。
+                </p>
+                <dl className="mt-3 space-y-1.5 text-muted-foreground">
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="所有者が入っている"
+                        hint="意味のある所有者（オーナー）情報が登録されている文書の件数です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.stewardship.meaningfulOwner}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="プロジェクトが入っている"
+                        hint="プレースホルダではない、意味のあるプロジェクト紐づけがある文書の件数です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.stewardship.meaningfulProject}</dd>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <dt className="min-w-0 shrink">
+                      <PillarHintLabel
+                        label="トピックが入っている"
+                        hint="分類・トピックとして有効な値が入っている文書の件数です。"
+                      />
+                    </dt>
+                    <dd className="tabular-nums text-foreground">{overview.pillarDocumentCounts.stewardship.meaningfulTopicCategories}</dd>
+                  </div>
+                  <div className="mt-2 flex justify-between gap-2 rounded-md bg-muted/50 px-2 py-2 text-foreground">
+                    <dt className="min-w-0 font-medium">
+                      <PillarHintLabel
+                        label="まとめ：3つそろっている"
+                        hint="所有者・プロジェクト・トピックの3つが、いずれも有効な値でそろっている文書の件数です。母数に近いほど管理情報が整っています。"
+                      />
+                    </dt>
+                    <dd className="shrink-0 tabular-nums font-semibold">{overview.pillarDocumentCounts.stewardship.allThree}</dd>
+                  </div>
+                </dl>
+              </div>
+            </CardContent>
+          </TooltipProvider>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="pb-2">
@@ -688,13 +837,17 @@ const UnifiedMetadataPage = ({
   deepLinkRevision = 0,
   metadataRows,
   totalRowsFromApi,
-  onReloadData
+  onReloadData,
+  onlyActiveConnectScopes,
+  onOnlyActiveConnectScopesChange
 }: {
   deepLinkFocus?: string
   deepLinkRevision?: number
   metadataRows: UnifiedMetadataRecord[]
   totalRowsFromApi: number
   onReloadData: () => Promise<void>
+  onlyActiveConnectScopes: boolean
+  onOnlyActiveConnectScopesChange: (next: boolean) => void
 }) => {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
@@ -826,8 +979,22 @@ const UnifiedMetadataPage = ({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>オントロジーグラフ（ドキュメント単位）</CardTitle>
-        <CardDescription>各ドキュメントを1単位として管理するオントロジーグラフ一覧</CardDescription>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <CardTitle>オントロジーグラフ（ドキュメント単位）</CardTitle>
+            <CardDescription>各ドキュメントを1単位として管理するオントロジーグラフ一覧</CardDescription>
+          </div>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="ontology-unified-active-scope-only"
+              checked={onlyActiveConnectScopes}
+              onCheckedChange={(v) => onOnlyActiveConnectScopesChange(v === true)}
+            />
+            <label htmlFor="ontology-unified-active-scope-only" className="text-sm text-muted-foreground cursor-pointer max-w-[28rem]">
+              アクティブな接続スコープのみ表示（ガバナンス検知一覧と同じ item 範囲）
+            </label>
+          </div>
+        </div>
       </CardHeader>
       <CardContent>
         <TablePageControls
@@ -1601,7 +1768,9 @@ const OntologyOperations = () => {
     evidenceCoverage: 0,
     freshnessFit: 0,
     benchmarkLite: 0,
-    intentBreakdown: []
+    intentBreakdown: [],
+    pillarDocumentCounts: undefined,
+    ontologyScoreMode: 'count_based'
   })
   const [metadataRows, setMetadataRows] = useState<UnifiedMetadataRecord[]>([])
   const [metadataTotalRows, setMetadataTotalRows] = useState(0)
@@ -1610,6 +1779,7 @@ const OntologyOperations = () => {
   const [auditRows, setAuditRows] = useState<OntologyAuditRecord[]>([])
   const [isRefreshingGraphProjection, setIsRefreshingGraphProjection] = useState(false)
   const [nounResolutionEnabled, setNounResolutionEnabled] = useState(false)
+  const [unifiedScopeActiveOnly, setUnifiedScopeActiveOnly] = useState(true)
 
   const handlePostScoringProjectionRefresh = useCallback(async () => {
     try {
@@ -1658,7 +1828,7 @@ const OntologyOperations = () => {
     try {
       const [overviewResponse, metadataResponse, entityResponse, auditResponse] = await Promise.all([
         getOntologyOverview(),
-        fetchAllOntologyUnifiedMetadata(),
+        fetchAllOntologyUnifiedMetadata(unifiedScopeActiveOnly),
         fetchAllOntologyEntityMaster(),
         getOntologyAuditLogs(300, 0)
       ])
@@ -1682,7 +1852,7 @@ const OntologyOperations = () => {
       setEntityMasterTotalRows(0)
       setAuditRows([])
     }
-  }, [reloadScoringGate])
+  }, [reloadScoringGate, unifiedScopeActiveOnly])
 
   useEffect(() => {
     void loadOntologyM3Data()
@@ -1881,6 +2051,8 @@ const OntologyOperations = () => {
             metadataRows={metadataRows}
             totalRowsFromApi={metadataTotalRows}
             onReloadData={async () => { await loadOntologyM3Data() }}
+            onlyActiveConnectScopes={unifiedScopeActiveOnly}
+            onOnlyActiveConnectScopesChange={(next) => setUnifiedScopeActiveOnly(next)}
           />
         )}
         {(nounResolutionEnabled &&

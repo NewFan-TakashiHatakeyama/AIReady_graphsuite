@@ -17,7 +17,14 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr, Key
 
 from services.aws_clients import get_dynamodb_resource, get_lambda_client
-from services.ontology_graph_repository import rebuild_ontology_graph_projection_from_unified
+from services.connect_service import (
+    collect_file_metadata_item_ids_for_drives,
+    get_active_connect_drive_ids,
+)
+from services.ontology_graph_repository import (
+    load_ontology_entity_candidate_rows_from_graph_db,
+    rebuild_ontology_graph_projection_from_unified,
+)
 from services.repositories.audit_writer_repository import CommonAuditRepository
 from services.runtime_config import load_aws_runtime_config, load_tenant_registry
 from services.tenant_db_resolver import TenantDbResolver
@@ -490,7 +497,63 @@ def get_ontology_overview(tenant_id: str) -> dict[str, Any]:
         for item in active_unified
         if _as_text(item.get("item_id"))
     }
-    candidates = _query_tenant_rows(binding.ontology_entity_candidate_table_name, normalized_tenant_id)
+    # 件数ベースの情報整備指標（スコアリングより先に確認しやすい集計）
+    _active_profiles = [_extract_document_profile(row) for row in active_unified]
+    _denom_active = len(active_unified)
+    _freshness_by_status: dict[str, int] = {"active": 0, "aging": 0, "stale": 0, "other": 0}
+    for _row in active_unified:
+        _fs = str(_row.get("freshness_status") or "").strip().lower()
+        if _fs in _freshness_by_status:
+            _freshness_by_status[_fs] += 1
+        else:
+            _freshness_by_status["other"] += 1
+    _stale_or_aging_active = int(_freshness_by_status.get("aging", 0) + _freshness_by_status.get("stale", 0))
+    _in_duplicate_group = sum(1 for _r in active_unified if _r.get("duplicate_group_id"))
+    _non_canonical_duplicate = sum(
+        1
+        for _r in active_unified
+        if _r.get("duplicate_group_id") and not bool(_r.get("is_canonical_copy", False))
+    )
+    _count_meaningful_owner = sum(1 for _p in _active_profiles if _has_meaningful_owner(_p["owner"]))
+    _count_meaningful_project = sum(1 for _p in _active_profiles if _has_meaningful_project(_p["project"]))
+    _count_meaningful_topic = sum(
+        1 for _p in _active_profiles if _has_meaningful_topic_categories(_p["topic_categories"])
+    )
+    _count_all_three_stewardship = sum(
+        1
+        for _p in _active_profiles
+        if _has_meaningful_owner(_p["owner"])
+        and _has_meaningful_project(_p["project"])
+        and _has_meaningful_topic_categories(_p["topic_categories"])
+    )
+    _den_pillar = max(0, int(_denom_active))
+    if _den_pillar > 0:
+        _count_freshness_score_100 = 100.0 * (1.0 - float(_stale_or_aging_active) / float(_den_pillar))
+        _count_duplication_score_100 = 100.0 * (1.0 - float(_non_canonical_duplicate) / float(_den_pillar))
+        _count_stewardship_score_100 = 100.0 * (float(_count_all_three_stewardship) / float(_den_pillar))
+    else:
+        _count_freshness_score_100 = 100.0
+        _count_duplication_score_100 = 100.0
+        _count_stewardship_score_100 = 100.0
+    _count_freshness_score_100 = max(0.0, min(100.0, _count_freshness_score_100))
+    _count_duplication_score_100 = max(0.0, min(100.0, _count_duplication_score_100))
+    _count_stewardship_score_100 = max(0.0, min(100.0, _count_stewardship_score_100))
+
+    try:
+        sqlite_candidates, sqlite_candidate_total, sqlite_pending = load_ontology_entity_candidate_rows_from_graph_db(
+            normalized_tenant_id
+        )
+    except Exception as exc:
+        _logger.warning("Ontology overview: SQLite entity candidates unavailable: %s", exc)
+        sqlite_candidates, sqlite_candidate_total, sqlite_pending = [], 0, 0
+    if sqlite_candidate_total > 0:
+        candidates = sqlite_candidates
+        unresolved_candidates = sqlite_pending
+    else:
+        candidates = _query_tenant_rows(binding.ontology_entity_candidate_table_name, normalized_tenant_id)
+        unresolved_candidates = sum(
+            1 for row in candidates if str(row.get("status", "pending")).lower() == "pending"
+        )
     document_analysis_rows: list[dict[str, Any]] = []
     document_analysis_query_error = ""
     if governance_document_analysis_table_name:
@@ -501,9 +564,6 @@ def get_ontology_overview(tenant_id: str) -> dict[str, Any]:
             )
         except Exception as analysis_error:
             document_analysis_query_error = str(analysis_error)
-    unresolved_candidates = sum(
-        1 for row in candidates if str(row.get("status", "pending")).lower() == "pending"
-    )
     stale_or_aging = sum(
         1
         for row in unified
@@ -607,6 +667,19 @@ def get_ontology_overview(tenant_id: str) -> dict[str, Any]:
         ),
         3,
     )
+    legacy_ontology_metrics = {
+        "freshness_validity": round(float(freshness_validity), 4),
+        "canonicality_duplication": round(float(canonicality_duplication), 4),
+        "stewardship_findability": round(float(stewardship_findability), 4),
+        "base_ontology_score": round(float(base_ontology_score), 4),
+    }
+    freshness_validity = round(float(_clamp_ratio(_count_freshness_score_100 / 100.0)), 3)
+    canonicality_duplication = round(float(_clamp_ratio(_count_duplication_score_100 / 100.0)), 3)
+    stewardship_findability = round(float(_clamp_ratio(_count_stewardship_score_100 / 100.0)), 3)
+    base_ontology_score = round(
+        (freshness_validity + canonicality_duplication + stewardship_findability) / 3.0,
+        3,
+    )
     intent_coverage = round(_mean_or_default(intent_coverage_scores, default=0.0), 3)
     evidence_coverage = round(_mean_or_default(evidence_coverage_scores, default=0.0), 3)
     freshness_fit = round(_mean_or_default(freshness_fit_scores, default=0.0), 3)
@@ -663,11 +736,21 @@ def get_ontology_overview(tenant_id: str) -> dict[str, Any]:
         "noun_resolution_enabled": _feature_enabled("ONTOLOGY_NOUN_RESOLUTION_ENABLED", False),
         "high_spread_entities": high_spread_entities,
         "signal_scores": {
-            "freshness": freshness_signal,
-            "duplication": duplication_signal,
-            "location": location_signal,
-            "overall": round((freshness_signal + duplication_signal + location_signal) / 3.0, 3),
+            "freshness": round(float(_clamp_ratio(_count_freshness_score_100 / 100.0)), 3),
+            "duplication": round(float(_clamp_ratio(_count_duplication_score_100 / 100.0)), 3),
+            "location": round(float(_clamp_ratio(_count_stewardship_score_100 / 100.0)), 3),
+            "overall": round(
+                float(
+                    _clamp_ratio(_count_freshness_score_100 / 100.0)
+                    + _clamp_ratio(_count_duplication_score_100 / 100.0)
+                    + _clamp_ratio(_count_stewardship_score_100 / 100.0)
+                )
+                / 3.0,
+                3,
+            ),
         },
+        "ontology_score_mode": "count_based",
+        "legacy_ontology_metrics": legacy_ontology_metrics,
         "ontology_score": _clamp_ratio(ontology_score),
         "base_ontology_score": _clamp_ratio(base_ontology_score),
         "use_case_readiness": _clamp_ratio(use_case_readiness),
@@ -696,6 +779,25 @@ def get_ontology_overview(tenant_id: str) -> dict[str, Any]:
             "query_error": document_analysis_query_error,
         },
         "projection_metrics": latest_projection,
+        "pillar_document_counts": {
+            "denominator": _denom_active,
+            "note": "論理削除を除く UnifiedMetadata 活動行のみをカウント",
+            "freshness": {
+                "by_status": dict(_freshness_by_status),
+                "stale_or_aging": _stale_or_aging_active,
+            },
+            "duplication": {
+                "in_duplicate_group": _in_duplicate_group,
+                "non_canonical_duplicate_copy": _non_canonical_duplicate,
+                "canonical_or_no_duplicate_group": max(0, _denom_active - _non_canonical_duplicate),
+            },
+            "stewardship": {
+                "meaningful_owner": _count_meaningful_owner,
+                "meaningful_project": _count_meaningful_project,
+                "meaningful_topic_categories": _count_meaningful_topic,
+                "all_three": _count_all_three_stewardship,
+            },
+        },
     }
 
 
@@ -743,12 +845,36 @@ def list_ontology_unified_metadata(
     *,
     limit: int = 200,
     offset: int = 0,
+    only_active_connect_scopes: bool = False,
 ) -> dict[str, Any]:
+    """List UnifiedMetadata rows for the tenant.
+
+    When ``only_active_connect_scopes`` is true, applies the same item_id restriction as
+    ``GET /governance/findings`` with ``only_active_connect_scopes=true`` (active drives only),
+    so ontology and governance lists are comparable in the UI.
+    """
     binding = _binding(tenant_id)
     normalized_tenant_id = binding.tenant_id
     rows = _query_tenant_rows(binding.ontology_unified_metadata_table_name, normalized_tenant_id)
     # Soft-deleted rows are kept for retention/TTL, but should not be listed in UI.
     rows = [item for item in rows if not bool(item.get("is_deleted", False))]
+
+    restrict_item_ids: set[str] | None = None
+    if only_active_connect_scopes:
+        try:
+            drive_ids = get_active_connect_drive_ids(normalized_tenant_id)
+            restrict_item_ids = collect_file_metadata_item_ids_for_drives(
+                normalized_tenant_id,
+                drive_ids,
+            )
+        except ValueError:
+            restrict_item_ids = None
+    if restrict_item_ids is not None:
+        rows = [
+            item
+            for item in rows
+            if str(item.get("item_id") or "").strip() in restrict_item_ids
+        ]
     normalized_rows: list[dict[str, Any]] = []
     for item in rows:
         profile = _extract_document_profile(item)
@@ -776,6 +902,8 @@ def list_ontology_unified_metadata(
             "offset": bounded_offset,
             "total_count": len(normalized_rows),
         },
+        "only_active_connect_scopes": bool(only_active_connect_scopes),
+        "active_connect_scope_filter_applied": restrict_item_ids is not None,
     }
 
 

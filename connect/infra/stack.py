@@ -438,20 +438,46 @@ class AIReadyConnectStack(Stack):
                 )
             )
 
-        # SSM Parameter Store (read/write)
+        # SSM Parameter Store (read/write/delete for connection lifecycle cleanup)
         lambda_role.add_to_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.ALLOW,
                 actions=[
                     "ssm:GetParameter",
                     "ssm:GetParameters",
+                    "ssm:GetParametersByPath",
                     "ssm:PutParameter",
+                    "ssm:DeleteParameter",
                 ],
                 resources=[
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/MSGraph*",
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/{PROJECT}/*",
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/aiready/connect/*",
                 ],
+            )
+        )
+
+        # Secrets Manager: Connect client_secret per connection (name prefix /aiready/connect/)
+        lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:PutSecretValue",
+                    "secretsmanager:DeleteSecret",
+                ],
+                resources=[f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:*"],
+            )
+        )
+
+        # Assume customer-account roles when hybrid credentials are configured (role ARN stored per tenant in SSM).
+        lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["sts:AssumeRole"],
+                resources=["*"],
             )
         )
 

@@ -4,6 +4,29 @@ import { URL } from 'node:url'
 const PORT = Number(process.env.MOCK_API_PORT || 9621)
 const exportJobs = new Map()
 
+/** Playwright: Connect 削除 → Governance 一覧の連動を検証する専用テナント */
+const CONNECT_E2E_TENANT = 'tenant-connect-e2e'
+
+const initialConnectE2eSubscription = () => ({
+  id: 'sub-e2e-connect',
+  connection_id: 'conn-e2e-connect',
+  connection_name: 'E2E Test Connection',
+  resource: 'https://graph.microsoft.com/v1.0/drives/drive-e2e/root',
+  expiration_at: '2027-01-01T00:00:00Z',
+  client_state_verified: true,
+  status: 'active',
+  resource_type: 'drive',
+  target_type: 'drive'
+})
+
+let connectE2eSubscriptions = [initialConnectE2eSubscription()]
+let connectE2eFindingVisible = true
+
+const resetConnectDeleteE2eState = () => {
+  connectE2eSubscriptions = [initialConnectE2eSubscription()]
+  connectE2eFindingVisible = true
+}
+
 const json = (res, statusCode, payload, headers = {}) => {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -368,6 +391,46 @@ const createTenantData = (tenantId) => {
                 remediation_mode: 'owner_review',
                 remediation_action: 'notify_site_owner',
                 last_evaluated_at: '2026-03-10T09:00:00Z'
+              },
+              {
+                tenant_id: normalized,
+                finding_id: 'finding-tenant-a-approve-camel-e2e',
+                source: 'm365',
+                item_id: 'item-tenant-a-approve-camel-e2e',
+                item_name: 'approve-camel-e2e.docx',
+                item_url: `/${normalized}/approve-camel-e2e.docx`,
+                risk_score: 48.0,
+                raw_residual_risk: 0.48,
+                risk_level: 'high',
+                status: 'open',
+                workflow_status: 'normal',
+                exception_type: 'none',
+                remediation_state: 'pending_approval',
+                sensitive_composite: 0.4,
+                age_factor: 0.4,
+                exception_factor: 1.0,
+                asset_criticality: 1.0,
+                scan_confidence: 0.85,
+                ai_reachability: 0.7,
+                matched_guards: ['G2'],
+                guard_reason_codes: ['g7_no_label'],
+                detection_reasons: ['scenario_label_missing'],
+                finding_evidence: {
+                  external_recipients: [],
+                  acl_drift_diff: [],
+                  anonymous_links: [],
+                  org_edit_links: [],
+                  permission_targets: []
+                },
+                decision: 'review',
+                effective_policy_id: 'pol-org-001',
+                effective_policy_version: 1,
+                matched_policy_ids: ['pol-org-001'],
+                decision_trace: ['pol-org-001:review'],
+                reason_codes: ['all_users_broad_share'],
+                remediation_mode: 'approval',
+                remediation_action: 'remove_permissions',
+                last_evaluated_at: '2026-03-10T09:15:00Z'
               }
             ]
           : [])
@@ -375,7 +438,7 @@ const createTenantData = (tenantId) => {
       pagination: {
         limit: 300,
         offset: 0,
-        total_count: normalized === 'tenant-a' ? 2 : 1
+        total_count: normalized === 'tenant-a' ? 3 : 1
       }
     },
     suppressions: {
@@ -743,7 +806,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET,POST,OPTIONS',
+      'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
       'access-control-allow-headers': 'content-type,authorization,x-api-key'
     })
     res.end()
@@ -809,15 +872,144 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  const tenantData = createTenantData(tenantId)
-  const correlationId = `corr-${tenantId.replace(/[^a-zA-Z0-9_-]/g, '-')}-req`
+  const safeTenantLabel = tenantId || 'unknown'
+  const correlationId = `corr-${safeTenantLabel.replace(/[^a-zA-Z0-9_-]/g, '-')}-req`
   const responseHeaders = { 'x-correlation-id': correlationId }
 
+  if (urlObj.pathname === '/__e2e/reset-connect-delete' && req.method === 'POST') {
+    resetConnectDeleteE2eState()
+    json(res, 200, { status: 'ok' }, responseHeaders)
+    return
+  }
+
+  if (urlObj.pathname === '/connect/overview' && req.method === 'GET') {
+    json(
+      res,
+      200,
+      {
+        tenant_id: safeTenantLabel,
+        delivery_status: 'healthy',
+        queue_backlog: 0,
+        failed_jobs_24h: 0,
+        next_subscription_renewal_at: '-',
+        next_token_renewal_at: '-',
+        next_delta_sync_at: '-'
+      },
+      responseHeaders
+    )
+    return
+  }
+
+  if (urlObj.pathname === '/connect/subscriptions' && req.method === 'GET') {
+    const rows = tenantId === CONNECT_E2E_TENANT ? [...connectE2eSubscriptions] : []
+    json(
+      res,
+      200,
+      {
+        rows,
+        pagination: { limit: 200, offset: 0, total_count: rows.length }
+      },
+      responseHeaders
+    )
+    return
+  }
+
+  if (urlObj.pathname === '/connect/events' && req.method === 'GET') {
+    json(
+      res,
+      200,
+      {
+        rows: [],
+        pagination: { limit: 300, offset: 0, total_count: 0 },
+        resolved_tenant_id: safeTenantLabel
+      },
+      responseHeaders
+    )
+    return
+  }
+
+  const deleteSubMatch = urlObj.pathname.match(/^\/connect\/subscriptions\/([^/]+)$/)
+  if (deleteSubMatch && req.method === 'DELETE') {
+    const subId = decodeURIComponent(deleteSubMatch[1])
+    if (tenantId === CONNECT_E2E_TENANT) {
+      const idx = connectE2eSubscriptions.findIndex((r) => r.id === subId)
+      if (idx >= 0) {
+        connectE2eSubscriptions.splice(idx, 1)
+      }
+      connectE2eFindingVisible = false
+    }
+    json(
+      res,
+      200,
+      {
+        tenant_id: safeTenantLabel,
+        connection_id: urlObj.searchParams.get('connection_id') || 'conn-e2e-connect',
+        subscription_id: subId,
+        delete_mode: urlObj.searchParams.get('delete_mode') || 'safe',
+        status: 'deleted',
+        graph_unsubscribe_status: 'ok',
+        deleted_at: new Date().toISOString(),
+        governance_findings_close: {
+          file_metadata_rows: 1,
+          findings_closed: 1,
+          findings_attempted: 1
+        }
+      },
+      responseHeaders
+    )
+    return
+  }
+
+  const tenantData = createTenantData(tenantId)
+
   if (urlObj.pathname === '/governance/overview' && req.method === 'GET') {
-    json(res, 200, tenantData.overview, responseHeaders)
+    let overview = tenantData.overview
+    if (tenantId === CONNECT_E2E_TENANT) {
+      overview = {
+        ...overview,
+        initial_scan_gate_open: true,
+        counts: {
+          ...(overview.counts || {}),
+          total_findings: connectE2eFindingVisible ? 1 : 0,
+          active_findings: connectE2eFindingVisible ? 1 : 0,
+          acknowledged: overview.counts?.acknowledged ?? 0
+        }
+      }
+    }
+    json(res, 200, overview, responseHeaders)
     return
   }
   if (urlObj.pathname === '/governance/findings' && req.method === 'GET') {
+    if (tenantId === CONNECT_E2E_TENANT) {
+      const rows = connectE2eFindingVisible
+        ? [
+            {
+              tenant_id: CONNECT_E2E_TENANT,
+              finding_id: 'finding-connect-e2e-001',
+              source: 'm365',
+              item_id: 'item-connect-e2e-001',
+              item_name: 'e2e-connect.docx',
+              risk_score: 5.0,
+              raw_residual_risk: 0.5,
+              risk_level: 'medium',
+              status: 'open',
+              workflow_status: 'open',
+              container_id: 'drive-e2e',
+              container_type: 'drive'
+            }
+          ]
+        : []
+      json(
+        res,
+        200,
+        {
+          rows,
+          pagination: { limit: 300, offset: 0, total_count: rows.length }
+        },
+        responseHeaders
+      )
+      return
+    }
     json(res, 200, tenantData.findings, responseHeaders)
     return
   }
@@ -914,9 +1106,67 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  const remediationApproveMatch = urlObj.pathname.match(
+    /^\/governance\/findings\/([^/]+)\/remediation\/approve$/
+  )
+  if (remediationApproveMatch && req.method === 'POST') {
+    const approveFid = decodeURIComponent(remediationApproveMatch[1])
+    if (approveFid === 'finding-tenant-a-approve-camel-e2e') {
+      json(
+        res,
+        200,
+        {
+          findingId: approveFid,
+          tenantId: tenantId,
+          remediationState: 'executed',
+          remediationMode: 'approval',
+          allowedActions: ['rollback'],
+          lastExecutionId: 'exec-approve-camel-01',
+          result: {
+            phase: 'execute',
+            Results: [
+              {
+                actionType: 'remove_permissions',
+                permissionId: 'perm-camel-1',
+                Status: 'deleted',
+                httpStatus: 204
+              }
+            ]
+          }
+        },
+        responseHeaders
+      )
+      return
+    }
+  }
+
   const remediationGetMatch = urlObj.pathname.match(/^\/governance\/findings\/([^/]+)\/remediation$/)
   if (remediationGetMatch && req.method === 'GET') {
     const fid = decodeURIComponent(remediationGetMatch[1])
+    if (fid === 'finding-tenant-a-approve-camel-e2e') {
+      json(
+        res,
+        200,
+        {
+          tenant_id: tenantId,
+          finding_id: fid,
+          remediation_state: 'pending_approval',
+          remediation_mode: 'approval',
+          actions: [
+            {
+              action_type: 'remove_permissions',
+              action_id: 'rm-camel',
+              executable: true,
+              permission_ids: ['perm-camel-1']
+            }
+          ],
+          allowed_actions: ['propose', 'approve'],
+          version: 1
+        },
+        responseHeaders
+      )
+      return
+    }
     if (fid === 'finding-tenant-a-remediation-e2e') {
       json(
         res,
@@ -1193,6 +1443,6 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, '127.0.0.1', () => {
-  // eslint-disable-next-line no-console
+   
   console.log(`mock governance api listening on http://127.0.0.1:${PORT}`)
 })

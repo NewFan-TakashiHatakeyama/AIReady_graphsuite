@@ -172,7 +172,8 @@ def _process_record(record: dict[str, Any]) -> None:
     _gvr = str(governance_result.get("risk_level", "low") or "low").strip().lower()
     risk_level = "low" if _gvr == "none" else (_gvr or "low")
     file_name = str(source_item.get("name", ""))
-    # Ontology 取り込み対象は「risk=low かつ 対象拡張子」のみ。
+    # Ontology カタログ取り込みは is_target_for_ontology（拡張子・Finding 状態・
+    # ONTOLOGY_CATALOG_INGEST_MODE に応じたルールまたは Bedrock）で判定。
     if not is_target_for_ontology(
         file_name=file_name,
         risk_level=risk_level,

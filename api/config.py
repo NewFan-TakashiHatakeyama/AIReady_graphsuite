@@ -158,6 +158,8 @@ def parse_args() -> argparse.Namespace:
     args.governance_finding_table_name = get_env_value(
         "GOVERNANCE_FINDING_TABLE_NAME", "AIReadyGov-ExposureFinding"
     )
+    # 接続削除時に ExposureFinding を closed へ更新するため、API タスクロールに
+    # 当テーブルへの dynamodb:UpdateItem（および FileMetadata 読取）が必要。
     governance_document_analysis_default = get_env_value(
         "DOCUMENT_ANALYSIS_TABLE", "AIReadyGov-DocumentAnalysis"
     )

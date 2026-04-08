@@ -35,6 +35,11 @@ htmlcov/
 
 # Misc
 *.log
+# Optional governance remediation NDJSON (local debug; default path from run.ps1)
+graphsuite-governance-remediation.ndjson
+
+# diagrams / Graphviz intermediate (extensionless dot export; use .png only)
+**/aiready_stacks_overview
 
 # Archived debug/test files
 old/debug_logs/
@@ -58,7 +63,5 @@ api/scripts/*
 connect/scripts/*
 governance/scripts/*
 ontology/scripts/*
-
-# keep only this AWS scenario test tracked
-!governance/tests/aws/
-!governance/tests/aws/test_ft_tenant_alpha_abcd_expected.py
+*.txt
+*.png

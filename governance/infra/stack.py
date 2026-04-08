@@ -60,6 +60,7 @@ class AIReadyGovernanceStack(Stack):
         # Connect リソースの参照（既存スタックから Import）
         # ==========================================
         connect_file_metadata_table_name = f"{CONNECT_PROJECT}-FileMetadata"
+        connect_connections_table_name = f"{CONNECT_PROJECT}-Connections"
         _suffix = _graphsuite_bucket_suffix(self)
         connect_raw_bucket_name = f"{CONNECT_PROJECT.lower()}-raw-payload{_suffix}"
 
@@ -120,6 +121,21 @@ class AIReadyGovernanceStack(Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
+        # Optional: GraphSuite API ロールへ ExposureFinding の読み書き
+        # （接続削除時の検知バルククローズで dynamodb:UpdateItem が必要）
+        # CDK context: graphsuite_api_role_arn または connect_api_role_arn
+        _graphsuite_api_role_arn = (
+            self.node.try_get_context("graphsuite_api_role_arn")
+            or self.node.try_get_context("connect_api_role_arn")
+        )
+        if _graphsuite_api_role_arn:
+            _graphsuite_api_role = iam.Role.from_role_arn(
+                self,
+                "GraphsuiteApiRoleExposureFindingAccess",
+                role_arn=str(_graphsuite_api_role_arn),
+                mutable=True,
+            )
+            finding_table.grant_read_write_data(_graphsuite_api_role)
 
         policy_scope_table = dynamodb.Table(
             self,
@@ -228,6 +244,20 @@ class AIReadyGovernanceStack(Stack):
                 ],
             )
         )
+        # Connect API: Connections テーブル（Graph 資格情報の接続スコープ解決）
+        lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "dynamodb:GetItem",
+                    "dynamodb:Query",
+                ],
+                resources=[
+                    f"arn:aws:dynamodb:{self.region}:{self.account}:table/{connect_connections_table_name}",
+                    f"arn:aws:dynamodb:{self.region}:{self.account}:table/{connect_connections_table_name}/index/*",
+                ],
+            )
+        )
 
         # Hard-cut: detectSensitivity / Ontology 連携権限は廃止
 
@@ -255,6 +285,25 @@ class AIReadyGovernanceStack(Stack):
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/MSGraphClientId",
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter/MSGraphClientSecret",
                 ],
+            )
+        )
+
+        # Connect API: per-connection client_secret in Secrets Manager + hybrid customer AssumeRole
+        lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret",
+                ],
+                resources=[f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:*"],
+            )
+        )
+        lambda_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["sts:AssumeRole"],
+                resources=["*"],
             )
         )
 

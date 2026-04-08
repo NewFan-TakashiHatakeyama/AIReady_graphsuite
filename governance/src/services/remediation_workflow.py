@@ -41,6 +41,40 @@ def _now_iso() -> str:
     return datetime.now(TOKYO_TZ).isoformat()
 
 
+_ADVISORY_ONLY_SKIPPED_ACTION_TYPES: frozenset[str] = frozenset(
+    {"owner_review", "suggest_restricted_access", "manual_review", "approval"}
+)
+
+
+def _graph_permission_deletes_succeeded(action_results: list[dict[str, Any]]) -> bool:
+    remove_rows = [
+        row
+        for row in action_results
+        if isinstance(row, dict) and str(row.get("action_type") or "").lower() == "remove_permissions"
+    ]
+    if not remove_rows:
+        return False
+    return all(
+        str(row.get("status") or "").lower() in {"deleted", "not_found"} for row in remove_rows
+    )
+
+
+def _manual_required_rows_are_advisory_only(
+    action_results: list[dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    types: list[str] = []
+    for row in action_results:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("status") or "").lower() != "manual_required":
+            continue
+        at = str(row.get("action_type") or "").lower()
+        if at not in _ADVISORY_ONLY_SKIPPED_ACTION_TYPES:
+            return False, []
+        types.append(at)
+    return True, types
+
+
 def _get_finding_table():
     global _finding_table
     if _finding_table is None:
@@ -465,6 +499,26 @@ def _mark_finding_completed(tenant_id: str, finding_id: str) -> None:
     )
 
 
+def _mark_finding_remediation_in_progress(tenant_id: str, finding_id: str) -> None:
+    """是正実行直後: 再スコアで risk が low/none になるまで status を in_progress にする。"""
+    now = _now_iso()
+    _get_finding_table().update_item(
+        Key={"tenant_id": tenant_id, "finding_id": finding_id},
+        UpdateExpression="""
+            SET #status = :status,
+                workflow_status = :workflow_status,
+                last_evaluated_at = :evaluated_at
+        """,
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={
+            ":status": "in_progress",
+            ":workflow_status": "normal",
+            ":evaluated_at": now,
+        },
+        ConditionExpression="attribute_exists(finding_id)",
+    )
+
+
 def _mark_finding_reopened_after_rollback(tenant_id: str, finding_id: str) -> None:
     """Re-open finding lifecycle state after rollback."""
     now = _now_iso()
@@ -716,6 +770,15 @@ def approve_remediation(
             f"approve is not allowed for remediation_mode={finding_remediation_mode or 'unknown'}"
         )
     current_state = str(finding.get("remediation_state") or "ai_proposed").strip().lower()
+    # Idempotent approve: first request may persist "approved" while the client retries or
+    # auto-execute is still pending; allow a second approve to return success and continue
+    # to chained execute in remediate_finding.handler.
+    if current_state == "approved":
+        if not finding.get("remediation_actions"):
+            raise RemediationConflictError("No remediation proposal exists.")
+        detail = get_remediation_detail(tenant_id, finding_id)
+        detail["approved"] = True
+        return detail
     if current_state not in {"ai_proposed", "pending_approval", "failed"}:
         raise RemediationConflictError(
             f"approve is not allowed for remediation_state={current_state}"
@@ -782,7 +845,7 @@ def _upsert_connect_permissions_snapshot(
     graph_item: dict[str, Any],
     previous_metadata: dict[str, Any] | None,
     change_type: str = "remediation-execute",
-) -> None:
+) -> dict[str, Any]:
     """Persist live Graph permissions into Connect FileMetadata.
 
     This closes the gap between remediation execution and stream-driven rescoring by
@@ -901,6 +964,21 @@ def _upsert_connect_permissions_snapshot(
     source_metadata["permissions_sync_source"] = str(change_type).replace("-", "_")
     source_metadata["permissions_synced_at"] = _now_iso()
 
+    source_metadata_str = json.dumps(source_metadata, ensure_ascii=False)
+    base = dict(previous_metadata) if isinstance(previous_metadata, dict) else {}
+    merged_row: dict[str, Any] = {
+        **base,
+        "tenant_id": tenant_id,
+        "permissions": permissions_json,
+        "permissions_count": int(len(permissions)),
+        "modified_at": modified_at,
+        "item_name": item_name,
+        "web_url": web_url,
+        "source": "m365",
+        "source_metadata": source_metadata_str,
+        "last_change_type": str(change_type),
+    }
+
     update_expression = """
         SET tenant_id = :tenant_id,
             #permissions = :permissions,
@@ -927,10 +1005,11 @@ def _upsert_connect_permissions_snapshot(
             ":item_name": item_name,
             ":web_url": web_url,
             ":source": "m365",
-            ":source_metadata": json.dumps(source_metadata, ensure_ascii=False),
+            ":source_metadata": source_metadata_str,
             ":last_change_type": str(change_type),
         },
     )
+    return merged_row
 
 
 def execute_remediation(
@@ -997,11 +1076,22 @@ def execute_remediation(
             executable = bool(action.get("executable", True))
             if not executable or action_type == "manual_review":
                 manual_required = True
+                # Graph DELETE は試みずにスキップ。調査用に reason_code / reason を必ず残す（旧実装は空になり UI の理由コードが出ない）。
+                reason_code = (
+                    "manual_review_planned"
+                    if action_type == "manual_review"
+                    else "non_executable_action"
+                )
+                title = str(action.get("title") or "").strip()
+                catalog_reason = str(action.get("reason") or "").strip()
                 action_results.append(
                     {
                         "action_type": action_type,
                         "action_id": action.get("action_id"),
                         "status": "manual_required",
+                        "reason_code": reason_code,
+                        "reason": catalog_reason or title or reason_code,
+                        "executable": False,
                     }
                 )
                 continue
@@ -1030,6 +1120,13 @@ def execute_remediation(
                 }
             )
 
+        advisory_skipped_types: list[str] = []
+        if manual_required and _graph_permission_deletes_succeeded(action_results):
+            advisory_ok, advisory_skipped_types = _manual_required_rows_are_advisory_only(action_results)
+            # All non-executable rows are advisory-only (e.g. suggest_restricted_access): treat as executed.
+            if advisory_ok:
+                manual_required = False
+
         next_state = "manual_required" if manual_required else "executed"
         # Persist post-remediation ACL to Connect metadata so stream-driven rescoring
         # can pick up the same permission state without waiting for external delta timing.
@@ -1037,7 +1134,7 @@ def execute_remediation(
             drive_id=drive_id,
             item_id=item_id,
         )
-        _upsert_connect_permissions_snapshot(
+        merged_metadata_row = _upsert_connect_permissions_snapshot(
             tenant_id=tenant_id,
             drive_id=drive_id,
             item_id=item_id,
@@ -1045,7 +1142,8 @@ def execute_remediation(
             previous_metadata=metadata,
             change_type="remediation-execute",
         )
-        # リスク再計算は Connect FileMetadata の更新 → DynamoDB Streams → analyzeExposure に委ねる。
+        # リスク再計算は Streams → analyzeExposure に加え、是正 Lambda 内で同期実行する。
+        # （Stream が remediation_state 更新より先に走ると auto_complete 条件を満たさないレースがあるため）
         post_verify = {
             "immediate_rescore": False,
             "success": True,
@@ -1070,11 +1168,33 @@ def execute_remediation(
                 "executed_by": executed_by,
                 "results": action_results,
                 "manual_required": manual_required,
+                **(
+                    {"advisory_steps_skipped": advisory_skipped_types}
+                    if advisory_skipped_types
+                    else {}
+                ),
                 "post_verification": post_verify,
             },
         )
-        # 是正完了（手動要の一部残りも含む）: ライフサイクルを完了にし抑止をクリアする。
-        _mark_finding_completed(tenant_id, finding_id)
+        # 再スコアで low/none 確定まで in_progress（完了は finding_manager.upsert_finding が設定）
+        _mark_finding_remediation_in_progress(tenant_id, finding_id)
+        if merged_metadata_row:
+            try:
+                from handlers.analyze_exposure import upsert_finding_from_file_metadata_image
+
+                upsert_finding_from_file_metadata_image(merged_metadata_row)
+            except Exception as sync_exc:
+                logger.warning(
+                    "execute_remediation: synchronous post-remediation rescore failed "
+                    "(DynamoDB stream may still apply): %s",
+                    sync_exc,
+                    exc_info=True,
+                    extra={
+                        "tenant_id": tenant_id,
+                        "finding_id": finding_id,
+                        "item_id": item_id,
+                    },
+                )
     except Exception as exc:
         logger.error(f"execute_remediation failed: {exc}")
         _update_finding_remediation(

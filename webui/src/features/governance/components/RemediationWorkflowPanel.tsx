@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import Button from '@/components/ui/Button'
 import { GovernanceRemediationDetailResponse } from '@/api/graphsuite'
+import {
+  executionResultRows,
+  planActionType,
+  planPermissionIds,
+  remediationActionsList,
+  remediationDetailState,
+  resultRowPermissionId,
+  resultRowStatus,
+} from '@/features/governance/remediationPayloadFields'
 import DryRunDiffPanel from '@/features/governance/components/DryRunDiffPanel'
 import OperationConfirmDialog from '@/features/governance/components/OperationConfirmDialog'
 import { DiffLine, JsonDiffNode, RemediationOperationRecord } from '@/features/governance/remediationTypes'
@@ -39,15 +48,21 @@ const extractUserEmailFromPermission = (permission: Record<string, any>): string
   return invitedEmail
 }
 
-const stateLabelJa = (state: string): string => {
-  const normalized = state.trim().toLowerCase()
-  if (normalized === 'removed') return '削除済み'
-  if (normalized === 'restored') return '復元済み'
-  if (normalized === 'already_absent') return '元々なし'
-  if (normalized === 'manual_required') return '手動対応'
-  if (normalized === 'planned') return '実行予定'
-  if (normalized === 'exists') return '共有あり'
-  return state || '-'
+/** JSON 構造差分と同一の before/after 文字列（Dry-run Diff の表示をこれに揃える） */
+const buildRemovePermissionSnapshotStrings = (
+  resultRow: Record<string, any> | undefined
+): { before: string; after: string } => {
+  const r = resultRow as Record<string, unknown> | undefined
+  const rollbackData = (r?.rollback_data ?? r?.rollbackData ?? {}) as Record<string, any>
+  const email = extractUserEmailFromPermission(rollbackData) || '-'
+  const roles = Array.isArray(rollbackData.roles)
+    ? rollbackData.roles.map((role) => String(role ?? '').trim()).filter(Boolean)
+    : []
+  const afterStatus = (r ? resultRowStatus(r) : '') || 'planned'
+  return {
+    before: `email=${email},roles=${roles.join('|') || '-'},state=exists`,
+    after: `state=${afterStatus}`,
+  }
 }
 
 const RemediationWorkflowPanel = ({
@@ -68,20 +83,19 @@ const RemediationWorkflowPanel = ({
   const [isConfirmDialogOpen, setIsConfirmDialogOpen] = useState(false)
   const remediationActions = useMemo(
     () =>
-      (Array.isArray(remediationDetail?.actions) ? remediationDetail.actions : []).map((action) => ({
-        actionType: String(action?.action_type ?? '').trim(),
-        scope: String(action?.scope ?? '').trim(),
-        permissionIds: Array.isArray(action?.permission_ids)
-          ? action.permission_ids.map((id) => String(id ?? '').trim()).filter(Boolean)
-          : [],
+      remediationActionsList(remediationDetail).map((action) => ({
+        actionType: planActionType(action),
+        scope: String(action.scope ?? '').trim(),
+        permissionIds: planPermissionIds(action),
       })),
     [remediationDetail]
   )
   const executionResultsByPermissionId = useMemo(() => {
-    const rows = Array.isArray(remediationDetail?.result?.results) ? remediationDetail?.result?.results : []
+    const rows = executionResultRows(remediationDetail)
     const map = new Map<string, Record<string, any>>()
     rows.forEach((row) => {
-      const permissionId = String(row?.permission_id ?? '').trim()
+      const rec = row as Record<string, unknown>
+      const permissionId = resultRowPermissionId(rec)
       if (permissionId) {
         map.set(permissionId, row as Record<string, any>)
       }
@@ -127,31 +141,13 @@ const RemediationWorkflowPanel = ({
       if (normalizedActionType === 'remove_permissions' && action.permissionIds.length > 0) {
         action.permissionIds.forEach((permissionId, pidIdx) => {
           const resultRow = executionResultsByPermissionId.get(permissionId)
-          const rollbackData = (resultRow?.rollback_data ?? {}) as Record<string, any>
-          const roles = Array.isArray(rollbackData.roles)
-            ? rollbackData.roles.map((role) => String(role ?? '').trim()).filter(Boolean)
-            : []
-          const email = extractUserEmailFromPermission(rollbackData) || '-'
-          const beforeState = Object.keys(rollbackData).length > 0 ? 'exists' : 'planned'
-          const rawStatus = String(resultRow?.status ?? '').trim().toLowerCase()
-          const afterState =
-            rawStatus === 'deleted'
-              ? 'removed'
-              : rawStatus === 'restored'
-                ? 'restored'
-                : rawStatus === 'not_found'
-                  ? 'already_absent'
-                  : rawStatus === 'manual_required'
-                    ? 'manual_required'
-                    : 'planned'
-          const roleText = roles.length > 0 ? roles.join('|') : '-'
+          const { before, after } = buildRemovePermissionSnapshotStrings(resultRow)
           const baseLine = index * 100 + pidIdx + 1
-          const emailText = email !== '-' ? email : '取得不可'
           lines.push({
             oldLineNumber: baseLine,
             newLineNumber: baseLine,
             type: 'remove' as const,
-            oldText: `Before: 共有状態=${stateLabelJa(beforeState)} / 対象権限ID=${permissionId} / 共有先=${emailText} / 権限=${roleText}`,
+            oldText: `Before: 対象権限ID=${permissionId} / ${before}`,
             newText: '',
           })
           lines.push({
@@ -159,7 +155,7 @@ const RemediationWorkflowPanel = ({
             newLineNumber: baseLine,
             type: 'add' as const,
             oldText: '',
-            newText: `After : 共有状態=${stateLabelJa(afterState)} / 対象権限ID=${permissionId} / 共有先=${emailText} / 権限=${roleText}`,
+            newText: `After: 対象権限ID=${permissionId} / ${after}`,
           })
         })
       } else {
@@ -168,7 +164,7 @@ const RemediationWorkflowPanel = ({
             oldLineNumber: index + 1,
             newLineNumber: index + 1,
             type: 'remove' as const,
-            oldText: `action_type=${action.actionType || 'unknown'} / state=before`,
+            oldText: 'Before: state=planned',
             newText: '',
           },
           {
@@ -176,7 +172,7 @@ const RemediationWorkflowPanel = ({
             newLineNumber: index + 1,
             type: 'add' as const,
             oldText: '',
-            newText: `action_type=${action.actionType || 'unknown'} / state=after`,
+            newText: 'After: state=applied',
           }
         )
       }
@@ -195,16 +191,11 @@ const RemediationWorkflowPanel = ({
         if (normalizedActionType === 'remove_permissions' && action.permissionIds.length > 0) {
           action.permissionIds.forEach((permissionId) => {
             const resultRow = executionResultsByPermissionId.get(permissionId)
-            const rollbackData = (resultRow?.rollback_data ?? {}) as Record<string, any>
-            const email = extractUserEmailFromPermission(rollbackData) || '-'
-            const roles = Array.isArray(rollbackData.roles)
-              ? rollbackData.roles.map((role) => String(role ?? '').trim()).filter(Boolean)
-              : []
-            const after = String(resultRow?.status ?? 'planned').trim() || 'planned'
+            const { before, after } = buildRemovePermissionSnapshotStrings(resultRow)
             nodes.push({
               key: `${action.actionType || `action_${index + 1}`}:${permissionId}`,
-              before: `email=${email},roles=${roles.join('|') || '-'},state=exists`,
-              after: `state=${after}`,
+              before,
+              after,
               type: 'changed' as const,
             })
           })
@@ -212,8 +203,8 @@ const RemediationWorkflowPanel = ({
         }
         nodes.push({
           key: action.actionType || `action_${index + 1}`,
-          before: 'planned',
-          after: 'applied',
+          before: 'state=planned',
+          after: 'state=applied',
           type: 'changed' as const,
         })
       })
@@ -222,7 +213,11 @@ const RemediationWorkflowPanel = ({
     [executionResultsByPermissionId, remediationActions]
   )
   const operation = useMemo<RemediationOperationRecord>(() => {
-    const remediationState = String(remediationDetail?.remediation_state ?? selectedFinding.remediationState)
+    const remediationState = String(
+      remediationDetailState(remediationDetail) ?? selectedFinding.remediationState ?? ''
+    )
+      .trim()
+      .toLowerCase()
     const workflowStatus: RemediationOperationRecord['workflowStatus'] =
       remediationState === 'approved'
         ? 'pending_approval'

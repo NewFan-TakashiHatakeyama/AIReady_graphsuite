@@ -128,8 +128,8 @@ class OntologyInferenceService:
         )
         if result is None:
             _record_fallback_metric(task="infer_ontology_target")
-            # Bedrock 未設定/失敗時はオントロジー一覧が空になりやすいため、
-            # 低リスクかつ AI 利用可かつ対象拡張子なら取り込み許可（ルールベース）。
+            # Bedrock 未設定/失敗時: 低リスクかつ対象拡張子なら True（ai_eligible は見ない）。
+            # 推論成功時は ai_eligible を payload に渡すが、最終判定は result.data["is_target"] のみ。
             from src.shared.ontology_target_policy import is_supported_extension
 
             rl = str(risk_level or "").strip().lower()
@@ -137,7 +137,6 @@ class OntologyInferenceService:
                 rl = "low"
             if rl != "low":
                 return False
-            # ai_eligible は推論成功時のみ厳密に扱い、推論不能時は低リスク拡張子のみでカタログ掲載を許可する
             return is_supported_extension(file_name)
         return bool(result.data.get("is_target", False))
 

@@ -118,6 +118,10 @@ python scripts/check_aws_test_terminology.py
    `governance-aws-smoke.yml` を `workflow_dispatch` で実行し、`--run-aws` 付きテストを実施します。  
    `run_ft_scoring_engine=true` の場合、`tests/aws/test_ft_scoring_engine.py` も実行します。
 
+### 是正フローとコンテンツ信頼度
+
+`GOVERNANCE_CONTENT_CONFIDENCE_THRESHOLD` 未満の `analysis_confidence` でも、露出ベクトルが権限スキャン由来（例: `public_link`, `org_link` 系）のときは `remediation_mode=approval` / `remediation_action=remove_permissions` へ誘導し、承認後に Graph API で権限削除できるようにします（既定）。従来どおり低信頼度で常に `owner_review` に落とす場合は `GOVERNANCE_CONFIDENCE_FAILSAFE_IGNORE_PERMISSION_VECTORS=false` を設定してください。
+
 ### ステージング / 本番相当環境での検証（実 AWS）
 
 単体テストだけでは Graph・実テナントデータを踏んだ end-to-end は保証しません。デプロイ後は次を併用してください。
@@ -208,6 +212,7 @@ npx playwright test e2e/governance-remediation-completed-flow.spec.ts
 
 ## 設計書
 
+- [トリガー・DynamoDB リソース調査（IaC / API 経路）](../Docs/実装内容/Governance-トリガーとリソース調査.md)
 - [基本設計書](./Docs/基本設計.md)
 - [過剰共有（Oversharing）](./Docs/過剰共有（Oversharing）.md)
 - [詳細設計書](./Docs/詳細設計.md)

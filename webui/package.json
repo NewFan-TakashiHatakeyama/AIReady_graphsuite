@@ -12,6 +12,7 @@
     "e2e:ui": "playwright test --ui",
     "e2e:real": "playwright test --config=playwright.real.config.ts",
     "typecheck:governance": "tsc --noEmit -p tsconfig.governance.json",
+    "verify:remediation-normalize": "npx --yes tsx scripts/verify-remediation-normalize.ts",
     "dev-no-bun": "vite",
     "build-no-bun": "vite build --emptyOutDir",
     "preview-no-bun": "vite preview"

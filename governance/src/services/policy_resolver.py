@@ -24,6 +24,31 @@ _DECISION_PRIORITY: dict[str, int] = {
     "block": 7,
 }
 
+# Exposure vectors derived from Graph permissions / scanners (not LLM doc classification).
+_PERMISSION_GROUNDED_EXPOSURE_VECTORS: frozenset[str] = frozenset(
+    {
+        "public_link",
+        "org_link",
+        "org_link_view",
+        "org_link_edit",
+        "all_users",
+        "guest",
+        "external_domain",
+        "external_domain_not_allowlisted",
+        "specific_people_external",
+        "guest_direct_share",
+        "external_email_direct_share",
+        "external_domain_share",
+        "excessive_permissions",
+        "inherited_oversharing",
+    }
+)
+
+
+def _exposure_has_permission_grounding(exposure_vectors: list[str]) -> bool:
+    normalized = {str(v).strip().lower() for v in exposure_vectors if str(v).strip()}
+    return bool(normalized.intersection(_PERMISSION_GROUNDED_EXPOSURE_VECTORS))
+
 
 def _policy_applies(policy: Policy, context: PolicyContext) -> bool:
     scope = policy.scope
@@ -336,16 +361,39 @@ def resolve_effective_policy(
     except Exception:
         confidence_threshold = 0.7
     analysis_confidence = _safe_float(field_data.get("analysis_confidence", 0.0))
+    ignore_failsafe_when_permission_grounded = str(
+        get_env("GOVERNANCE_CONFIDENCE_FAILSAFE_IGNORE_PERMISSION_VECTORS", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    permission_grounded = _exposure_has_permission_grounding(exposure_vectors)
     if analysis_confidence < confidence_threshold and best_effect in {"block", "deny", "warn", "allow"}:
-        trace.append(
-            f"failsafe:confidence<{confidence_threshold:.2f}({analysis_confidence:.2f})=>review"
-        )
-        best_effect = "review"
-        best_risk = max(best_risk, "high", key=lambda x: {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(x, 0))
-        best_mode = "owner_review"
-        if best_action in {"", "remove_permissions"}:
-            best_action = "request_review"
-        decision_source = "fallback"
+        if ignore_failsafe_when_permission_grounded and permission_grounded:
+            trace.append(
+                f"failsafe:confidence<{confidence_threshold:.2f}({analysis_confidence:.2f})"
+                "=>approval_remove_permissions(permission_grounded_vectors)"
+            )
+            best_effect = "review"
+            best_risk = max(
+                best_risk,
+                "high",
+                key=lambda x: {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(x, 0),
+            )
+            best_mode = "approval"
+            best_action = "remove_permissions"
+            decision_source = "fallback"
+        else:
+            trace.append(
+                f"failsafe:confidence<{confidence_threshold:.2f}({analysis_confidence:.2f})=>review"
+            )
+            best_effect = "review"
+            best_risk = max(
+                best_risk,
+                "high",
+                key=lambda x: {"low": 1, "medium": 2, "high": 3, "critical": 4}.get(x, 0),
+            )
+            best_mode = "owner_review"
+            if best_action in {"", "remove_permissions"}:
+                best_action = "request_review"
+            decision_source = "fallback"
 
     snapshot_dict: dict[str, Any] = {
         "effective_policy_id": effective_id,

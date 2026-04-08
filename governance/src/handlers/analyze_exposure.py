@@ -16,12 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from services.exposure_vectors import FileMetadata, extract_exposure_vectors
-from services.finding_manager import (
-    generate_finding_id,
-    get_finding,
-    handle_item_deletion,
-    upsert_finding,
-)
+from services.finding_manager import handle_item_deletion, upsert_finding
 from services.content_signal_analyzer import analyze_content_signals
 from services.guard_matcher import (
     match_guards,
@@ -147,75 +142,7 @@ def process_record(record: dict) -> None:
             }},
         )
 
-    # --- Step 1: 検知件数要素算出 ---
-    metadata = extract_metadata(new_image)
-    content_signals, content_analysis = _resolve_content_analysis(metadata)
-    _fid = generate_finding_id(metadata.tenant_id, metadata.source, metadata.item_id)
-    _existing_finding = get_finding(metadata.tenant_id, _fid)
-
-    exposure_result = calculate_exposure_score(metadata)
-    exposure_result.vectors = normalize_vectors(exposure_result.vectors)
-    risk_summary = summarize_detected_risks(
-        exposure_vectors=exposure_result.vectors,
-        content_signals=content_signals,
-    )
-
-    # --- Step 2: 判定カテゴリ（Guard）マッチング ---
-    matched_guards = match_guards(
-        exposure_vectors=exposure_result.vectors,
-        source=metadata.source,
-    )
-    guard_reason_codes = resolve_guard_reason_codes(
-        exposure_vectors=exposure_result.vectors,
-        matched_guards=matched_guards,
-    )
-    detection_reasons = resolve_detection_reasons(exposure_result.vectors)
-    policy_context = build_policy_context(
-        metadata,
-        content_signals=content_signals,
-        content_analysis=content_analysis,
-    )
-    effective_policy = resolve_effective_policy(
-        context=policy_context,
-        policies=list_active_policies(metadata.tenant_id),
-        exposure_vectors=exposure_result.vectors,
-    )
-    policy_eval = evaluate_policy_snapshot(effective_policy)
-
-    # --- Step 3: Finding の create/update ---
-    finding = upsert_finding(
-        tenant_id=metadata.tenant_id,
-        item=metadata,
-        exposure_result=exposure_result,
-        risk_level=risk_summary.risk_level,
-        risk_type_counts=risk_summary.risk_type_counts,
-        exposure_vector_counts=risk_summary.exposure_vector_counts,
-        total_detected_risks=risk_summary.total_detected_risks,
-        workflow_status=None,
-        exception_type=None,
-        exception_review_due_at=None,
-        matched_guards=matched_guards,
-        guard_reason_codes=guard_reason_codes,
-        detection_reasons=detection_reasons,
-        decision=str(policy_eval.get("decision", "review")),
-        effective_policy_id=str(policy_eval.get("effective_policy_id", "")),
-        effective_policy_version=int(policy_eval.get("effective_policy_version", 1)),
-        matched_policy_ids=list(policy_eval.get("matched_policy_ids", [])),
-        decision_trace=list(policy_eval.get("decision_trace", [])),
-        reason_codes=list(policy_eval.get("reason_codes", [])),
-        remediation_mode=str(policy_eval.get("remediation_mode", "manual")),
-        remediation_action=str(policy_eval.get("remediation_action", "request_review")),
-        policy_hash=str(policy_eval.get("policy_hash", "")),
-        decision_source=str(policy_eval.get("decision_source", "fallback")),
-        expected_audience=str(policy_eval.get("expected_audience", content_signals.get("expected_audience", "internal_need_to_know"))),
-        expected_department=str(policy_eval.get("expected_department", content_signals.get("expected_department", "unknown"))),
-        expectation_gap_reason=str(policy_eval.get("expectation_gap_reason", "")),
-        expectation_gap_score=float(policy_eval.get("expectation_gap_score", 0.0)),
-        content_signals=content_signals,
-        content_analysis=content_analysis,
-    )
-    if bool(content_signals.get("contains_pii", False)):
-        emit_count("AIReadyGov.PIIDetected", dimensions={"TenantId": metadata.tenant_id})
+    upsert_finding_from_file_metadata_image(new_image)
 
     # detectSensitivity 連携は過剰共有限定スコープのため廃止。
 
@@ -239,11 +166,18 @@ def is_scoring_relevant_change(new_image: dict, old_image: dict) -> bool:
 
 
 def _should_force_re_evaluate(new_image: dict[str, Any]) -> bool:
-    """再接続/手動再同期イベントで差分判定をバイパスすべきか判定する。"""
+    """再接続/手動再同期/是正スナップショット更新で差分判定をバイパスすべきか判定する。
+
+    是正実行後の ``update_item`` は Graph の ``lastModifiedDateTime`` 等の都合で
+    ``SCORING_RELEVANT_FIELDS`` 上の差分が空に見えることがある。
+    その場合に MODIFY をスキップすると ``in_progress`` のまま再スコアされず完了に進まない。
+    """
     if bool(new_image.get("force_re_evaluate", False)):
         return True
     last_change_type = str(new_image.get("last_change_type", "")).strip().lower()
-    return last_change_type == "manual-sync-check"
+    if last_change_type == "manual-sync-check":
+        return True
+    return last_change_type in {"remediation-execute", "remediation-rollback"}
 
 
 def extract_metadata(image: dict) -> FileMetadata:
@@ -408,4 +342,78 @@ def enqueue_sensitivity_scan(finding: dict[str, Any], metadata: FileMetadata) ->
     del finding, metadata
     return False
 
+
+def upsert_finding_from_file_metadata_image(new_image: dict[str, Any]) -> None:
+    """FileMetadata 相当の dict から露出スコアを計算し Finding を upsert する。
+
+    DynamoDB Streams 経由の ``process_record`` と、是正直後の同期再スコアの双方から呼ぶ。
+    ``new_image`` は ``deserialize_image`` 済みのプレーン dict（streams と同形）を想定する。
+    """
+    # --- Step 1: 検知件数要素算出 ---
+    metadata = extract_metadata(new_image)
+    content_signals, content_analysis = _resolve_content_analysis(metadata)
+
+    exposure_result = calculate_exposure_score(metadata)
+    exposure_result.vectors = normalize_vectors(exposure_result.vectors)
+    risk_summary = summarize_detected_risks(
+        exposure_vectors=exposure_result.vectors,
+        content_signals=content_signals,
+    )
+
+    # --- Step 2: 判定カテゴリ（Guard）マッチング ---
+    matched_guards = match_guards(
+        exposure_vectors=exposure_result.vectors,
+        source=metadata.source,
+    )
+    guard_reason_codes = resolve_guard_reason_codes(
+        exposure_vectors=exposure_result.vectors,
+        matched_guards=matched_guards,
+    )
+    detection_reasons = resolve_detection_reasons(exposure_result.vectors)
+    policy_context = build_policy_context(
+        metadata,
+        content_signals=content_signals,
+        content_analysis=content_analysis,
+    )
+    effective_policy = resolve_effective_policy(
+        context=policy_context,
+        policies=list_active_policies(metadata.tenant_id),
+        exposure_vectors=exposure_result.vectors,
+    )
+    policy_eval = evaluate_policy_snapshot(effective_policy)
+
+    # --- Step 3: Finding の create/update ---
+    upsert_finding(
+        tenant_id=metadata.tenant_id,
+        item=metadata,
+        exposure_result=exposure_result,
+        risk_level=risk_summary.risk_level,
+        risk_type_counts=risk_summary.risk_type_counts,
+        exposure_vector_counts=risk_summary.exposure_vector_counts,
+        total_detected_risks=risk_summary.total_detected_risks,
+        workflow_status=None,
+        exception_type=None,
+        exception_review_due_at=None,
+        matched_guards=matched_guards,
+        guard_reason_codes=guard_reason_codes,
+        detection_reasons=detection_reasons,
+        decision=str(policy_eval.get("decision", "review")),
+        effective_policy_id=str(policy_eval.get("effective_policy_id", "")),
+        effective_policy_version=int(policy_eval.get("effective_policy_version", 1)),
+        matched_policy_ids=list(policy_eval.get("matched_policy_ids", [])),
+        decision_trace=list(policy_eval.get("decision_trace", [])),
+        reason_codes=list(policy_eval.get("reason_codes", [])),
+        remediation_mode=str(policy_eval.get("remediation_mode", "manual")),
+        remediation_action=str(policy_eval.get("remediation_action", "request_review")),
+        policy_hash=str(policy_eval.get("policy_hash", "")),
+        decision_source=str(policy_eval.get("decision_source", "fallback")),
+        expected_audience=str(policy_eval.get("expected_audience", content_signals.get("expected_audience", "internal_need_to_know"))),
+        expected_department=str(policy_eval.get("expected_department", content_signals.get("expected_department", "unknown"))),
+        expectation_gap_reason=str(policy_eval.get("expectation_gap_reason", "")),
+        expectation_gap_score=float(policy_eval.get("expectation_gap_score", 0.0)),
+        content_signals=content_signals,
+        content_analysis=content_analysis,
+    )
+    if bool(content_signals.get("contains_pii", False)):
+        emit_count("AIReadyGov.PIIDetected", dimensions={"TenantId": metadata.tenant_id})
 

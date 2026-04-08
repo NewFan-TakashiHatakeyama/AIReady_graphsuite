@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.exceptions import ClientError
 
 from services.aws_clients import get_dynamodb_client, get_dynamodb_resource
 from services.runtime_config import load_aws_runtime_config
@@ -16,6 +21,9 @@ from services.tenant_db_resolver import TenantDbResolver
 DEFAULT_QUERY_LIMIT = 200
 MAX_QUERY_LIMIT = 500
 MAX_QUERY_ITEMS = 5000
+
+logger = logging.getLogger(__name__)
+TOKYO_TZ = ZoneInfo("Asia/Tokyo")
 
 _runtime_config = load_aws_runtime_config()
 _tenant_db_resolver = TenantDbResolver(_runtime_config)
@@ -147,6 +155,112 @@ def _resolve_target_type(row: dict[str, Any]) -> str:
     return "unknown"
 
 
+def generate_governance_finding_id(tenant_id: str, source: str, item_id: str) -> str:
+    """Governance Lambda `finding_manager.generate_finding_id` と同一規則。"""
+    raw = f"{tenant_id}:{source}:{item_id}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def _finding_source_variants(primary: str) -> tuple[str, ...]:
+    """既存データ差異向けに m365 / microsoft365 の別名を試す。"""
+    p = str(primary or "m365").strip() or "m365"
+    ordered: list[str] = []
+    for candidate in (p, "m365", "microsoft365"):
+        c = str(candidate).strip().lower()
+        if c and c not in ordered:
+            ordered.append(c)
+    return tuple(ordered)
+
+
+def _try_close_governance_finding(table: Any, item_tenant_id: str, finding_id: str) -> bool:
+    """存在する Finding を closed にする。無ければ False。"""
+    now = datetime.now(TOKYO_TZ).isoformat()
+    try:
+        table.update_item(
+            Key={"tenant_id": item_tenant_id, "finding_id": finding_id},
+            UpdateExpression="SET #st = :status, last_evaluated_at = :now",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":status": "closed",
+                ":now": now,
+            },
+            ConditionExpression="attribute_exists(finding_id)",
+        )
+        return True
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", "") or "")
+        if code == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def close_governance_findings_for_connect_drive(
+    *,
+    resolver_tenant_id: str,
+    drive_id: str,
+    file_metadata_table: Any,
+) -> dict[str, int]:
+    """Connect FileMetadata の drive 配下に対応する ExposureFinding をベストエフォートで closed にする。
+
+    FileMetadata 行を drive_id で列挙し、tenant_id / item_id / source から finding_id を決定的に算出して更新する。
+    Streams 非依存（接続 safe 削除で Metadata が残る場合の整合用）。
+
+    IAM: API ロールに対象 `governance_finding_table` への dynamodb:UpdateItem が必要。
+
+    Args:
+        resolver_tenant_id: TenantDbResolver 解決キー（呼び出しコンテキストのテナント）。
+        drive_id: 対象ドライブ ID。
+        file_metadata_table: boto3 DynamoDB Table（FileMetadata）。
+
+    Returns:
+        file_metadata_rows, findings_closed, findings_attempted の件数。
+    """
+    normalized_drive = str(drive_id or "").strip()
+    if not normalized_drive:
+        return {"file_metadata_rows": 0, "findings_closed": 0, "findings_attempted": 0}
+
+    binding = _tenant_db_resolver.resolve(resolver_tenant_id)
+    finding_table = _get_dynamodb_resource().Table(binding.governance_finding_table_name)
+
+    fm_rows = 0
+    closed = 0
+    attempted = 0
+    last_key = None
+    while True:
+        qkwargs: dict[str, Any] = {
+            "KeyConditionExpression": Key("drive_id").eq(normalized_drive),
+            "ProjectionExpression": "tenant_id, item_id, #src",
+            "ExpressionAttributeNames": {"#src": "source"},
+            "Limit": 200,
+        }
+        if last_key:
+            qkwargs["ExclusiveStartKey"] = last_key
+        response = file_metadata_table.query(**qkwargs)
+        items = response.get("Items", [])
+        for item in items:
+            fm_rows += 1
+            item_id = str(item.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            item_tid = str(item.get("tenant_id") or resolver_tenant_id).strip() or resolver_tenant_id
+            primary_source = str(item.get("source") or "m365").strip() or "m365"
+            for source in _finding_source_variants(primary_source):
+                attempted += 1
+                fid = generate_governance_finding_id(item_tid, source, item_id)
+                if _try_close_governance_finding(finding_table, item_tid, fid):
+                    closed += 1
+                    break
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+
+    return {
+        "file_metadata_rows": fm_rows,
+        "findings_closed": closed,
+        "findings_attempted": attempted,
+    }
+
+
 def _query_findings_by_status_gsi(
     tenant_id: str, statuses: list[str]
 ) -> list[dict[str, Any]]:
@@ -249,6 +363,7 @@ def list_governance_findings(
     statuses: list[str] | None = None,
     include_document_analysis: bool = True,
     action_required_only: bool = False,
+    restrict_item_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     normalized_tenant_id = str(tenant_id or "").strip()
     if not normalized_tenant_id:
@@ -314,6 +429,12 @@ def list_governance_findings(
             item["expectation_gap_score"] = 0.0
     if action_required_only:
         findings = [item for item in findings if _is_action_required_row(item)]
+    if restrict_item_ids is not None:
+        findings = [
+            item
+            for item in findings
+            if str(item.get("item_id") or "").strip() in restrict_item_ids
+        ]
     findings.sort(key=lambda item: str(item.get("last_evaluated_at", "")), reverse=True)
 
     paged = findings[normalized_offset : normalized_offset + normalized_limit]

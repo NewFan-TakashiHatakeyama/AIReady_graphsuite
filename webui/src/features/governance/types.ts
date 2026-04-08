@@ -1,4 +1,11 @@
-export type FindingStatus = 'new' | 'open' | 'completed' | 'closed' | 'acknowledged' | 'remediated'
+export type FindingStatus =
+  | 'new'
+  | 'open'
+  | 'in_progress'
+  | 'completed'
+  | 'closed'
+  | 'acknowledged'
+  | 'remediated'
 export type GovernanceWorkflowStatus = 'acknowledged' | 'normal' | 'none'
 export type RemediationState =
   | 'ai_proposed'

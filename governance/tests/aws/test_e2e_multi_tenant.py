@@ -120,7 +120,10 @@ class TestE2E3MultiTenant:
             ExpressionAttributeValues={":tid": TEST_TENANT_ID_2},
         )
         b_findings = resp_b.get("Items", [])
-        b_item_ids = {f["item_id"] for f in b_findings if f.get("status") == "open"}
+        # 新規 Finding は status=new で作成され、後から open へ遷移する。削除の影響判定は「closed 化されていない」こと。
+        b_item_ids = {
+            f["item_id"] for f in b_findings if f.get("status") not in (None, "closed")
+        }
         for iid in tenant_b_items:
             assert iid in b_item_ids, (
                 f"Tenant B Finding for {iid} incorrectly affected by Tenant A deletion"

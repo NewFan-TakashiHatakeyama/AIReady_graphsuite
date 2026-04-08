@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, Depends, Query, HTTPException, Request, Res
 import logging
 
 logger = logging.getLogger(__name__)
+
 from utils_api import get_combined_auth_dependency, get_tenant_context_dependency
 from tenant_context import TenantContext
 from schemas.graph_schema import EntityUpdateRequest, RelationUpdateRequest
@@ -71,6 +72,7 @@ from services.governance_api_service import (
     get_governance_finding_remediation,
     get_governance_overview,
     list_governance_suppressions,
+    log_governance_remediation_route_debug,
     propose_governance_remediation,
     trigger_governance_daily_scan,
     list_governance_policies,
@@ -88,6 +90,8 @@ from services.connect_service import (
     create_connect_onboarding,
     delete_connect_subscription,
     get_connect_overview,
+    collect_file_metadata_item_ids_for_drives,
+    get_active_connect_drive_ids,
     list_connect_audit,
     list_connect_events,
     list_connect_jobs,
@@ -1586,6 +1590,10 @@ def create_graph_routes(api_key: Optional[str] = None):
             False,
             description="Return only actionable findings (status=new/open/acknowledged and medium+ or risk_score>=5.0)",
         ),
+        only_active_connect_scopes: bool = Query(
+            False,
+            description="When true, return only findings whose item_id exists under active Connect drive scopes.",
+        ),
         request: Request = None,
         tenant_context: TenantContext = Depends(get_tenant_context_dependency(api_key)),
     ):
@@ -1595,12 +1603,27 @@ def create_graph_routes(api_key: Optional[str] = None):
         try:
             _reject_tenant_override(request)
             status_list = [s.strip() for s in statuses.split(",") if s.strip()]
+            restrict_item_ids = None
+            if only_active_connect_scopes:
+                try:
+                    drive_ids = get_active_connect_drive_ids(tenant_context.tenant_id)
+                    restrict_item_ids = collect_file_metadata_item_ids_for_drives(
+                        tenant_context.tenant_id,
+                        drive_ids,
+                    )
+                except ValueError:
+                    # Connect が当該テナント向けに無効な場合は全件表示にフォールバックする。
+                    restrict_item_ids = None
             _log_audit(
                 request,
                 tenant_context,
                 "governance.findings.read",
                 tenant_context.username,
-                {"statuses": status_list, "action_required_only": action_required_only},
+                {
+                    "statuses": status_list,
+                    "action_required_only": action_required_only,
+                    "only_active_connect_scopes": only_active_connect_scopes,
+                },
             )
             return list_governance_findings(
                 tenant_id=tenant_context.tenant_id,
@@ -1608,6 +1631,7 @@ def create_graph_routes(api_key: Optional[str] = None):
                 offset=offset,
                 statuses=status_list if status_list else None,
                 action_required_only=action_required_only,
+                restrict_item_ids=restrict_item_ids,
             )
         except HTTPException:
             raise
@@ -1630,6 +1654,11 @@ def create_graph_routes(api_key: Optional[str] = None):
                 "governance.finding.remediation.read",
                 tenant_context.username,
                 {"finding_id": finding_id, "target": finding_id},
+            )
+            log_governance_remediation_route_debug(
+                action="get",
+                finding_id=finding_id,
+                tenant_id=tenant_context.tenant_id,
             )
             return get_governance_finding_remediation(
                 tenant_id=tenant_context.tenant_id,
@@ -1663,6 +1692,11 @@ def create_graph_routes(api_key: Optional[str] = None):
                 "governance.finding.remediation.propose",
                 resolved_operator,
                 {"finding_id": finding_id, "target": finding_id, "force": force},
+            )
+            log_governance_remediation_route_debug(
+                action="propose",
+                finding_id=finding_id,
+                tenant_id=tenant_context.tenant_id,
             )
             return propose_governance_remediation(
                 tenant_id=tenant_context.tenant_id,
@@ -1698,6 +1732,11 @@ def create_graph_routes(api_key: Optional[str] = None):
                 resolved_operator,
                 {"finding_id": finding_id, "target": finding_id},
             )
+            log_governance_remediation_route_debug(
+                action="approve",
+                finding_id=finding_id,
+                tenant_id=tenant_context.tenant_id,
+            )
             return approve_governance_remediation(
                 tenant_id=tenant_context.tenant_id,
                 finding_id=finding_id,
@@ -1731,6 +1770,11 @@ def create_graph_routes(api_key: Optional[str] = None):
                 resolved_operator,
                 {"finding_id": finding_id, "target": finding_id},
             )
+            log_governance_remediation_route_debug(
+                action="execute",
+                finding_id=finding_id,
+                tenant_id=tenant_context.tenant_id,
+            )
             return execute_governance_remediation(
                 tenant_id=tenant_context.tenant_id,
                 finding_id=finding_id,
@@ -1763,6 +1807,11 @@ def create_graph_routes(api_key: Optional[str] = None):
                 "governance.finding.remediation.rollback",
                 resolved_operator,
                 {"finding_id": finding_id, "target": finding_id},
+            )
+            log_governance_remediation_route_debug(
+                action="rollback",
+                finding_id=finding_id,
+                tenant_id=tenant_context.tenant_id,
             )
             return rollback_governance_remediation(
                 tenant_id=tenant_context.tenant_id,
@@ -2160,6 +2209,10 @@ def create_graph_routes(api_key: Optional[str] = None):
     async def get_ontology_unified_metadata_route(
         limit: int = Query(200, description="Maximum rows", ge=1, le=500),
         offset: int = Query(0, description="Pagination offset", ge=0),
+        only_active_connect_scopes: bool = Query(
+            False,
+            description="When true, list only rows whose item_id exists under active Connect drive scopes (aligns with governance findings).",
+        ),
         request: Request = None,
         tenant_context: TenantContext = Depends(get_tenant_context_dependency(api_key)),
     ):
@@ -2170,11 +2223,13 @@ def create_graph_routes(api_key: Optional[str] = None):
                 tenant_context,
                 "ontology.unified_metadata.read",
                 tenant_context.username,
+                {"only_active_connect_scopes": only_active_connect_scopes},
             )
             return list_ontology_unified_metadata(
                 tenant_id=tenant_context.tenant_id,
                 limit=limit,
                 offset=offset,
+                only_active_connect_scopes=only_active_connect_scopes,
             )
         except HTTPException:
             raise

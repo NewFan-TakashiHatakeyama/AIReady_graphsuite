@@ -3,6 +3,7 @@ import { backendBaseUrl } from '@/lib/constants'
 import { errorMessage } from '@/lib/utils'
 import { navigationService } from '@/services/navigation'
 import { useSettingsStore } from '@/stores/settings'
+import { normalizeGovernanceRemediationDetailResponse as normalizeGovernanceRemediationDetailResponseRaw } from './governanceRemediationNormalize'
 
 // Types
 export type LightragNodeType = {
@@ -117,7 +118,7 @@ export type GovernanceFindingApiRow = {
   secrets_detected?: boolean
   secret_types?: string[]
   sensitivity_scan_at?: string | null
-  status?: 'new' | 'open' | 'completed' | 'remediated' | 'acknowledged' | 'closed'
+  status?: 'new' | 'open' | 'in_progress' | 'completed' | 'remediated' | 'acknowledged' | 'closed'
   workflow_status?: 'acknowledged' | 'normal' | 'none'
   exception_type?: string
   exception_review_due_at?: string | null
@@ -198,6 +199,9 @@ export type GovernanceRemediationDetailResponse = {
   finding_id: string
   remediation_state: 'ai_proposed' | 'pending_approval' | 'approved' | 'executed' | 'failed' | 'manual_required'
   remediation_mode?: string
+  /** Lambda が承認直後の自動実行をスキップした場合 true（手動 execute 不可） */
+  auto_execute_skipped?: boolean
+  auto_execute_skip_reason?: string
   actions?: Array<Record<string, any>>
   allowed_actions?: string[]
   version?: number
@@ -220,6 +224,12 @@ export type GovernanceRemediationDetailResponse = {
   rollback_id?: string
 }
 
+function normalizeGovernanceRemediationDetailResponse(
+  data: unknown
+): GovernanceRemediationDetailResponse {
+  return normalizeGovernanceRemediationDetailResponseRaw(data) as GovernanceRemediationDetailResponse
+}
+
 export type GovernanceExceptionRegistrationRequest = {
   exception_type: 'temporary_accept' | 'permanent_accept' | 'compensating_control' | 'false_positive' | 'business_required'
   duration_days?: number
@@ -229,6 +239,14 @@ export type GovernanceExceptionRegistrationRequest = {
   scope?: Record<string, any>
 }
 
+
+export type GovernanceIncidentCounts = {
+  total_denominator: number
+  public_link: number
+  external_domain_share: number
+  internal_oversharing: number
+  unclassified: number
+}
 
 export type GovernanceOverviewResponse = {
   governance_score?: number
@@ -249,6 +267,7 @@ export type GovernanceOverviewResponse = {
       label?: string
       value?: number
       score?: number
+      issue_count?: number
     }>
     assurance?: Array<{
       key?: string
@@ -273,6 +292,8 @@ export type GovernanceOverviewResponse = {
     governance_raw?: number
     exception_debt?: number
     coverage_penalty?: number
+    /** raw_residual 系の旧ブレンド総合スコア（参考） */
+    legacy_blended_governance_score?: number
   }
   high_risk_count: number
   action_required_count?: number
@@ -289,7 +310,9 @@ export type GovernanceOverviewResponse = {
     total_findings?: number
     active_findings?: number
     acknowledged?: number
+    governance_incident_counts?: GovernanceIncidentCounts
   }
+  governance_incident_counts?: GovernanceIncidentCounts
   protection_score_breakdown?: {
     factors: {
       exposure: number
@@ -416,7 +439,7 @@ export type GovernanceOverviewResponse = {
 
 export type GovernanceSuppressionApiRow = {
   finding_id: string
-  status: 'new' | 'open' | 'completed' | 'remediated' | 'acknowledged' | 'closed'
+  status: 'new' | 'open' | 'in_progress' | 'completed' | 'remediated' | 'acknowledged' | 'closed'
   workflow_status?: 'acknowledged' | 'normal' | 'none'
   exception_type?: string
   exception_review_due_at?: string | null
@@ -580,6 +603,12 @@ export type ConnectSubscriptionApiRow = {
   tenant_hint?: string
 }
 
+export type GovernanceFindingsCloseSummary = {
+  file_metadata_rows: number
+  findings_closed: number
+  findings_attempted: number
+}
+
 export type ConnectSubscriptionDeleteResponse = {
   tenant_id: string
   connection_id: string
@@ -588,6 +617,7 @@ export type ConnectSubscriptionDeleteResponse = {
   status: string
   graph_unsubscribe_status: string
   deleted_at: string
+  governance_findings_close?: GovernanceFindingsCloseSummary | null
 }
 
 export type ConnectSubscriptionsResponse = {
@@ -934,6 +964,33 @@ export type OntologyOverviewResponse = {
   freshness_fit?: number
   benchmark_lite?: number
   intent_breakdown?: Array<{ intent_id: string; label?: string; score: number }>
+  /** 情報整備3軸の件数（活動Unified行ベース。スコア換算なし） */
+  pillar_document_counts?: {
+    denominator: number
+    note?: string
+    freshness: {
+      by_status: { active: number; aging: number; stale: number; other: number }
+      stale_or_aging: number
+    }
+    duplication: {
+      in_duplicate_group: number
+      non_canonical_duplicate_copy: number
+      canonical_or_no_duplicate_group: number
+    }
+    stewardship: {
+      meaningful_owner: number
+      meaningful_project: number
+      meaningful_topic_categories: number
+      all_three: number
+    }
+  }
+  ontology_score_mode?: 'count_based' | 'legacy'
+  legacy_ontology_metrics?: {
+    freshness_validity?: number
+    canonicality_duplication?: number
+    stewardship_findability?: number
+    base_ontology_score?: number
+  }
 }
 
 export type OntologyProjectionRefreshResponse = {
@@ -1013,6 +1070,10 @@ export type OntologyUnifiedMetadataResponse = {
     offset: number
     total_count: number
   }
+  /** Echo of query param; when true, API aligns with governance findings scope filtering. */
+  only_active_connect_scopes?: boolean
+  /** True when Connect scope restriction was applied (false if Connect disabled and API fell back to all rows). */
+  active_connect_scope_filter_applied?: boolean
 }
 
 export type OntologyEntityMasterApiRow = {
@@ -1333,25 +1394,28 @@ export const getOntologyEntityCandidates = async (
 export const getGovernanceFindings = async (
   limit: number = 200,
   offset: number = 0,
-  statuses: string = 'new,open,acknowledged,closed',
+  statuses: string = 'new,open,in_progress,acknowledged,closed',
   _includeDocumentAnalysis: boolean = false,
-  actionRequiredOnly: boolean = false
+  actionRequiredOnly: boolean = false,
+  onlyActiveConnectScopes: boolean = false
 ): Promise<GovernanceFindingsResponse> => {
   // Hard-cut compatibility: include_document_analysis contract is retired.
   void _includeDocumentAnalysis
   const response = await axiosInstance.get(
-    `/governance/findings?limit=${limit}&offset=${offset}&statuses=${encodeURIComponent(statuses)}&action_required_only=${actionRequiredOnly}`
+    `/governance/findings?limit=${limit}&offset=${offset}&statuses=${encodeURIComponent(statuses)}&action_required_only=${actionRequiredOnly}&only_active_connect_scopes=${onlyActiveConnectScopes}`
   )
   return response.data
 }
 
 export const getGovernanceFindingRemediation = async (
-  findingId: string
+  findingId: string,
+  options?: { signal?: AbortSignal }
 ): Promise<GovernanceRemediationDetailResponse> => {
   const response = await axiosInstance.get(
-    `/governance/findings/${encodeURIComponent(findingId)}/remediation`
+    `/governance/findings/${encodeURIComponent(findingId)}/remediation`,
+    { signal: options?.signal }
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 export const proposeGovernanceFindingRemediation = async (
@@ -1361,7 +1425,7 @@ export const proposeGovernanceFindingRemediation = async (
   const response = await axiosInstance.post(
     `/governance/findings/${encodeURIComponent(findingId)}/remediation/propose?force=${force}`
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 export const approveGovernanceFindingRemediation = async (
@@ -1370,7 +1434,7 @@ export const approveGovernanceFindingRemediation = async (
   const response = await axiosInstance.post(
     `/governance/findings/${encodeURIComponent(findingId)}/remediation/approve`
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 export const executeGovernanceFindingRemediation = async (
@@ -1379,7 +1443,7 @@ export const executeGovernanceFindingRemediation = async (
   const response = await axiosInstance.post(
     `/governance/findings/${encodeURIComponent(findingId)}/remediation/execute`
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 export const rollbackGovernanceFindingRemediation = async (
@@ -1388,7 +1452,7 @@ export const rollbackGovernanceFindingRemediation = async (
   const response = await axiosInstance.post(
     `/governance/findings/${encodeURIComponent(findingId)}/remediation/rollback`
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 export const markGovernanceFindingCompleted = async (
@@ -1397,7 +1461,7 @@ export const markGovernanceFindingCompleted = async (
   const response = await axiosInstance.post(
     `/governance/findings/${encodeURIComponent(findingId)}/complete`
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 export const registerGovernanceFindingException = async (
@@ -1408,7 +1472,7 @@ export const registerGovernanceFindingException = async (
     `/governance/findings/${encodeURIComponent(findingId)}/remediation/exception`,
     payload
   )
-  return response.data
+  return normalizeGovernanceRemediationDetailResponse(response.data)
 }
 
 
@@ -1527,9 +1591,12 @@ export const refreshOntologyGraphProjection = async (
 
 export const getOntologyUnifiedMetadata = async (
   limit: number = 200,
-  offset: number = 0
+  offset: number = 0,
+  onlyActiveConnectScopes: boolean = false
 ): Promise<OntologyUnifiedMetadataResponse> => {
-  const response = await axiosInstance.get(`/ontology/unified-metadata?limit=${limit}&offset=${offset}`)
+  const response = await axiosInstance.get(
+    `/ontology/unified-metadata?limit=${limit}&offset=${offset}&only_active_connect_scopes=${onlyActiveConnectScopes}`
+  )
   return response.data
 }
 
